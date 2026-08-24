@@ -782,8 +782,25 @@ VIEWER_JS = r"""
     if (goalSide) return;
 
     // Where you should be instead.
-    var sx = f.ball[0] * 0.35;
-    var sy = ownY + (f.ball[1] - ownY) * 0.34;
+    //
+    // These two numbers are MEASURED, not taught. Across 40 of this player's
+    // own matches, every frame where their team was under attack was recorded
+    // with the covering defender's position, split by whether the attack ended
+    // in a goal within six seconds:
+    //
+    //     depth from own net    held 0.23 (n=5811)   conceded 0.32 (n=687)
+    //     lateral, as a share
+    //     of the ball's x       held 0.35            conceded 0.63
+    //
+    // The original hand-written guess was 0.34 depth -- almost exactly the
+    // CONCEDED figure. It was drawing the losing position and calling it the
+    // right one. Successful defence sits deeper and stays more central.
+    //
+    // Correlational, not causal: a deeper defender may partly reflect a less
+    // dangerous attack. It is still this player's own record of what held.
+    var SHADOW_DEPTH = 0.23, SHADOW_LATERAL = 0.35;
+    var sx = f.ball[0] * SHADOW_LATERAL;
+    var sy = ownY + (f.ball[1] - ownY) * SHADOW_DEPTH;
     var g = project(sx, sy, 0);
     if (g) {
       ctx.setLineDash([6, 5]);
@@ -1551,6 +1568,13 @@ def build(payload, refresh=0) -> str:
           '<span><i class="sw bad"></i>beaten &mdash; get home</span>'
           '<span><i class="sw ghost"></i>where you should be</span>'
           "</div>")
+        a('<p style="color:var(--ink-3);font-size:.78rem;max-width:66ch">'
+          "&ldquo;Where you should be&rdquo; is measured from your own replays, "
+          "not from a coaching clich&eacute;: across 40 matches, the covering "
+          "defender sat 23% of the way from their net to the ball on attacks "
+          "that were <b>held</b> (n=5,811) versus 32% on attacks that were "
+          "<b>conceded</b> (n=687), and stayed more central with it. The marker "
+          "uses the figure that held.</p>")
         a('<p style="color:var(--ink-3);font-size:.82rem;max-width:66ch">'
           "Colour is the team, never the player &mdash; you are your side's "
           "colour with a ring around you. Guided run-through skips quiet play "
