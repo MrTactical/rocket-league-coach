@@ -1,0 +1,39 @@
+#:schema https://rlbot.org/schemas/match.json
+# You + Ally vs two All-Star bots. The default practice match.
+#
+# Change `launcher` to "Epic" if you would rather use the Epic install --
+# both are present on this machine. Steam tends to be more reliable.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "FiveMinutes"
+respawn_time = "ThreeSeconds"
+
+[[cars]]
+type = "human"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally.bot.toml"
+team = 0
+
+[[cars]]
+type = "psyonix"
+skill = "AllStar"
+team = 1
+
+[[cars]]
+type = "psyonix"
+skill = "AllStar"
+team = 1

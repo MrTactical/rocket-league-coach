@@ -1,0 +1,7 @@
+#:schema https://rlbot.org/schemas/agent.json
+[settings]
+agent_id = "joe/ally-trainer"
+name = "Ally Trainer"
+root_dir = ""
+run_command = '..\venv\Scripts\python.exe trainer.py'
+run_command_linux = "../venv/bin/python trainer.py"

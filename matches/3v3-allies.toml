@@ -1,0 +1,47 @@
+#:schema https://rlbot.org/schemas/match.json
+# You plus two Allies against three Allies. Your teammates coordinate with each
+# other over comms and rotate around you.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "FiveMinutes"
+respawn_time = "ThreeSeconds"
+
+[[cars]]
+type = "human"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-1.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-2.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-3.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-4.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-5.bot.toml"
+team = 1

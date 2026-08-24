@@ -1,0 +1,64 @@
+#:schema https://rlbot.org/schemas/match.json
+# The training rig.
+#
+# Six Allies plus a director script that resets the ball into a fresh drill the
+# moment the previous one goes quiet, and runs the game above real time. Three
+# multipliers stack: six cars pooling calibration, no dead time between useful
+# situations, and a game-speed multiplier.
+#
+# This is not for watching -- it is for leaving running. Afterwards, read
+# data/calibration.json to see what it taught itself.
+#
+# Speed multiplier:  $env:ALLY_TRAIN_SPEED = "3"   (default 2, capped at 4)
+# Above roughly 4x, Python bots start missing ticks and learn the wrong
+# lesson from their own late inputs.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = false          # rendering costs frames we would rather spend
+enable_state_setting = true       # required: the director teleports the ball
+existing_match_behavior = "Restart"
+auto_save_replay = false
+
+[mutators]
+match_length = "Unlimited"
+respawn_time = "OneSecond"
+boost_amount = "NormalBoost"
+
+[[scripts]]
+config_file = "../bot/trainer.script.toml"
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-1.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-2.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-3.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-4.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-5.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-6.bot.toml"
+team = 1

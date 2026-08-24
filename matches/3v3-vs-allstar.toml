@@ -1,0 +1,46 @@
+#:schema https://rlbot.org/schemas/match.json
+# You + Ally + an All-Star bot vs three All-Star bots.
+# Closer to standard play, and the rotation logic has more to work with.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "FiveMinutes"
+
+[[cars]]
+type = "human"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally.bot.toml"
+team = 0
+
+[[cars]]
+type = "psyonix"
+skill = "Pro"
+team = 0
+
+[[cars]]
+type = "psyonix"
+skill = "AllStar"
+team = 1
+
+[[cars]]
+type = "psyonix"
+skill = "AllStar"
+team = 1
+
+[[cars]]
+type = "psyonix"
+skill = "AllStar"
+team = 1

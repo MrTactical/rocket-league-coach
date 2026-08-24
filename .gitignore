@@ -1,0 +1,24 @@
+# Personal data. These contain your MMR, your match history, and the in-game
+# names of everyone you have played with or against. Never commit them.
+data/
+coach/rank.json
+coach/.replay-cache.json
+coach/.replay-cache.tmp
+coach-report.html
+*.replay
+collision_meshes/
+collision-meshes/
+
+# Build output and environment
+venv/
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+
+# The bundled parser is a 2 MB binary fetched at build time, not source.
+tools/rrrocket/
+
+# Third-party binary, not ours to redistribute. Fetch from rlbot.org.
+RLArenaCollisionDumper.exe
