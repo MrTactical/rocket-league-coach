@@ -48,10 +48,17 @@ from coach.mmrlog import LIVE_LOG, PLAYLISTS, read_all_logs  # noqa: E402
 from coach.timeline import DEMOS, load, save_replay_hint  # noqa: E402
 from coach.viewer import build_track  # noqa: E402
 
-# Beside the exe when frozen, beside the source otherwise. The bundle dir is
-# a temp folder that vanishes on exit, so nothing writable can live there.
-DATA = (Path(sys.executable).parent if getattr(sys, "frozen", False)
-        else ROOT / "coach")
+# Beside the exe when frozen; the bundle dir is a temp folder that vanishes on
+# exit, so nothing writable can live there.
+#
+# Running from source these belong in coach/ -- but the REPORT does not. It
+# lives at the project root, which is where the launcher, the README and the
+# browser tab all expect it. Sending it to coach/ meant the watcher happily
+# rebuilt a file nobody had open, so the page "never updated" while updating
+# perfectly every match.
+FROZEN = getattr(sys, "frozen", False)
+DATA = Path(sys.executable).parent if FROZEN else ROOT / "coach"
+REPORT = (DATA if FROZEN else ROOT) / "coach-report.html"
 CACHE = DATA / ".replay-cache.json"
 RANK = DATA / "rank.json"
 REFRESH_SECS = 30    # how often the written page re-loads itself
@@ -486,7 +493,7 @@ def main() -> int:
                     help="seconds between checks (default 15)")
     ap.add_argument("--once", action="store_true",
                     help="catch up on new replays, then exit")
-    ap.add_argument("--out", default=str(DATA / "coach-report.html"))
+    ap.add_argument("--out", default=str(REPORT))
     ap.add_argument("--verbose", action="store_true",
                     help="print the full analysis for each new match")
     ap.add_argument("--reset", action="store_true",
