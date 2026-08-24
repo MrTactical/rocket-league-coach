@@ -1,0 +1,14 @@
+{
+  "grand-champion": {
+    "depth_held": 0.2579584832457347,
+    "depth_conceded": 0.30430282744648984,
+    "lateral_held": 0.540489464235094,
+    "lateral_conceded": 0.4988404140898091,
+    "n_held": 15983,
+    "n_conceded": 1490,
+    "separation": 0.046344344200755117,
+    "matches": 30,
+    "playlist": "ranked-standard",
+    "fetched": "2026-08-24"
+  }
+}

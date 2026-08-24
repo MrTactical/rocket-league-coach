@@ -1274,38 +1274,59 @@ def rank_block(rank):
 
 
 def shadow_note(track):
-    """Where the 'be here' marker's numbers came from, in the page itself."""
+    """Where the marker's numbers came from, and how a higher rank compares."""
     sh = (track or {}).get("shadow") or {}
     if not sh.get("depth"):
         return ('<p style="color:var(--ink-3);font-size:.78rem;max-width:66ch">'
                 "&ldquo;Where you should be&rdquo; is using a fallback value. "
                 "Run <code>python coach/shadow.py</code> to measure it from "
                 "your own replays.</p>")
-    bits = [
-        "&ldquo;Where you should be&rdquo; is measured, not a coaching "
-        "clich&eacute;. Across %d of your matches the covering defender sat "
-        "<b>%.0f%%</b> of the way from their net to the ball on attacks that "
-        "were held (n=%s), against <b>%.0f%%</b> on attacks conceded (n=%s). "
-        "The marker uses the figure that held."
-        % (sh.get("matches", 0), 100 * sh["depth"], f"{sh.get('n_held', 0):,}",
-           100 * sh.get("depth_conceded", 0), f"{sh.get('n_conceded', 0):,}")
-    ]
+
+    size = sh.get("team_size") or 3
+    bits = ["&ldquo;Where you should be&rdquo; is measured, not a coaching "
+            "clich&eacute;. Across %d of your %dv%d matches the covering "
+            "defender sat <b>%.0f%%</b> of the way from their net to the ball "
+            "on attacks that were held (n=%s), against <b>%.0f%%</b> on "
+            "attacks conceded (n=%s)."
+            % (sh.get("matches", 0), size, size, 100 * sh["depth"],
+               f"{sh.get('n_held', 0):,}", 100 * sh.get("depth_conceded", 0),
+               f"{sh.get('n_conceded', 0):,}")]
+
     pro = sh.get("pro")
-    if pro:
-        arrow = "deeper" if pro["depth"] < sh["depth"] else "further up"
+    if pro and pro.get("depth"):
         bits.append(
-            "For comparison, %s players sit at <b>%.0f%%</b> (%d matches "
-            "sampled from ballchasing.com, measured with the same code) "
-            "&mdash; %.0f points %s than you."
-            % (esc(pro["rank"].replace("-", " ")), 100 * pro["depth"],
-               pro.get("matches", 0),
-               abs(100 * (pro["depth"] - sh["depth"])), arrow))
+            "Grand Champion play, measured with the same code over %d "
+            "downloaded replays, sits at <b>%.0f%%</b> deep and <b>%.0f%%</b> "
+            "across &mdash; against your %.0f%% and %.0f%%."
+            % (pro.get("matches", 0), 100 * pro["depth"],
+               100 * (pro.get("lateral") or 0), 100 * sh["depth"],
+               100 * (sh.get("lateral") or 0)))
+        # The consistency gap is the real finding, and it is not about depth.
+        mine_swing = abs((sh.get("lateral") or 0) -
+                         (sh.get("lateral_conceded") or 0))
+        pro_swing = abs((pro.get("lateral") or 0) -
+                        (pro.get("lateral_conceded") or 0))
+        if mine_swing > pro_swing * 2 and pro_swing >= 0:
+            bits.append(
+                "The gap that matters is consistency: their sideways position "
+                "barely moves between holding (%.0f%%) and conceding (%.0f%%), "
+                "while yours swings from %.0f%% to %.0f%%. They hold one "
+                "position; you over-shift toward the ball when it goes wrong."
+                % (100 * (pro.get("lateral") or 0),
+                   100 * (pro.get("lateral_conceded") or 0),
+                   100 * (sh.get("lateral") or 0),
+                   100 * (sh.get("lateral_conceded") or 0)))
+        if pro.get("separation") is not None and                 pro["separation"] < (sh.get("separation") or 1) * 0.7:
+            bits.append(
+                "Worth knowing: at their level this position predicts far less "
+                "(separation %.2f against your %.2f). Position is costing you "
+                "goals that it does not cost them."
+                % (pro["separation"], sh.get("separation") or 0))
     else:
         bits.append(
             "No higher-rank benchmark yet &mdash; add a ballchasing.com API "
-            "key and run <code>python coach/pro.py</code> to compare against "
-            "Grand Champion play.")
-    return ('<p style="color:var(--ink-3);font-size:.78rem;max-width:70ch">'
+            "key and the watcher will fetch one.")
+    return ('<p style="color:var(--ink-3);font-size:.78rem;max-width:72ch">'
             + " ".join(bits) + "</p>")
 
 

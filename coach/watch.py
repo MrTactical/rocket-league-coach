@@ -341,6 +341,8 @@ def rebuild(cache, out_path):
                       "n_held": d.get("n_held"), "n_conceded": d.get("n_conceded"),
                       "matches": d.get("matches"),
                       "team_size": d.get("team_size"),
+                      "lateral_conceded": d.get("lateral_conceded"),
+                      "separation": d.get("separation"),
                       # The viewer hides the marker below this: a position that
                       # does not tell holding from conceding is not advice.
                       "usable": (d.get("separation") or 0) >= 0.05}
@@ -351,9 +353,13 @@ def rebuild(cache, out_path):
                 pd = json.loads(pro.read_text(encoding="utf-8"))
                 best = sorted(pd.items())[-1] if pd else None
                 if best:
+                    b = best[1]
                     sh["pro"] = {"rank": best[0],
-                                 "depth": best[1].get("depth_held"),
-                                 "matches": best[1].get("matches")}
+                                 "depth": b.get("depth_held"),
+                                 "lateral": b.get("lateral_held"),
+                                 "lateral_conceded": b.get("lateral_conceded"),
+                                 "separation": b.get("separation"),
+                                 "matches": b.get("matches")}
             except Exception:
                 pass
         if sh:
