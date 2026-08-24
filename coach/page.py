@@ -348,6 +348,17 @@ code{font-family:"IBM Plex Mono",monospace;background:var(--surface-2);
 .moments button.demoed,.moments button.demo{border-left-color:var(--accent)}
 .moments b{font-family:"IBM Plex Mono",monospace;color:var(--ink-3);
   margin-right:7px;font-weight:400}
+.ctrl button.ghost{background:none;color:var(--ink-2);border:1px solid var(--line)}
+.caption{margin-top:10px;padding:12px 15px;border-radius:3px;font-size:.9rem;
+  background:var(--surface);border:1px solid var(--line);
+  border-left:3px solid var(--accent);color:var(--ink);max-width:78ch}
+.caption[hidden]{display:none}
+.caption b{display:block;font-family:"Saira Condensed",sans-serif;font-size:1.1rem;
+  text-transform:uppercase;letter-spacing:.05em;color:var(--accent);margin-bottom:3px}
+.caption.conceded{border-left-color:var(--bad)}
+.caption.conceded b{color:var(--bad)}
+.caption.scored{border-left-color:var(--good)}
+.caption.scored b{color:var(--good)}
 """
 
 
@@ -355,91 +366,180 @@ VIEWER_JS = r"""
 <script>
 (function () {
   var T = window.__TRACK__;
-  var tabs = document.querySelectorAll('.tabs button');
-  var panels = document.querySelectorAll('.panel');
+  var tabs = [].slice.call(document.querySelectorAll('.tabs button'));
+  var panels = [].slice.call(document.querySelectorAll('.panel'));
+  var onShow = null;
   function show(name) {
     tabs.forEach(function (b) {
       b.setAttribute('aria-selected', String(b.dataset.tab === name));
     });
     panels.forEach(function (p) { p.hidden = p.dataset.panel !== name; });
+    // A hidden panel has clientWidth 0, so a canvas sized on load paints an
+    // empty bitmap. Re-size whenever the tab actually becomes visible.
+    if (name === 'replay' && onShow) onShow();
   }
   tabs.forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.tab); });
   });
   show('overview');
-  // A hidden panel has clientWidth 0, so the canvas sizes to nothing on load
-  // and paints an empty 0x0 bitmap. Re-size whenever the tab is opened.
-  var onShow = null;
-  var _show = show;
-  show = function (name) { _show(name); if (name === 'replay' && onShow) onShow(); };
-  tabs.forEach(function (b) {
-    b.addEventListener('click', function () {
-      if (b.dataset.tab === 'replay' && onShow) onShow();
-    });
-  });
 
   if (!T || !T.frames || !T.frames.length) return;
 
-  // Field is 8192 x 10240 uu. Drawn so YOUR net is always at the bottom,
-  // whichever side you actually played -- otherwise half the replays read
-  // upside down and every "back post" note points the wrong way.
-  var W = 8192, H = 10240, PAD = 60;
+  var W = 8192, H = 10240, STRIDE = T.stride || 4;
+  var N = T.names.length;
   var cv = document.getElementById('pitch');
   var ctx = cv.getContext('2d');
   var range = document.getElementById('scrub');
   var play = document.getElementById('play');
+  var guide = document.getElementById('guide');
   var clock = document.getElementById('clock');
-  var i = 0, timer = null;
+  var caption = document.getElementById('caption');
+  var i = 0, timer = null, guided = false, rate = 1;
+  // Always defend the near goal, whichever side was actually played --
+  // otherwise half your replays render backwards.
   var flip = T.my_team === 1 ? -1 : 1;
 
   function css(v) {
     return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
   }
-  function X(x) { return PAD + (x * flip + W / 2) / W * (cv.width - PAD * 2); }
-  function Y(y) { return cv.height - PAD - (y * flip + H / 2) / H * (cv.height - PAD * 2); }
+
+  // --- a small hand-rolled perspective camera ---------------------------
+  // No 3D library: the scene is a flat pitch plus a dozen boxes, and a
+  // library would be 600 KB inlined to do what forty lines of projection do.
+  // Solved numerically rather than eyeballed: a parameter search over camera
+  // distance, height, pitch and focal length, maximising how much of the frame
+  // the pitch fills while keeping all four corners, both goal frames and the
+  // ceiling on screen. The first hand-picked values put the near goal line and
+  // both near corners below the bottom edge.
+  var CAM = {y: -9000, z: 8000, pitch: 0.80, f: 900};
+  function project(x, y, z) {
+    var rx = x * flip, ry = y * flip;
+    var dy = ry - CAM.y, dz = z - CAM.z;
+    var c = Math.cos(CAM.pitch), s = Math.sin(CAM.pitch);
+    var fwd = dy * c - dz * s;          // depth into the screen
+    var up = dy * s + dz * c;           // height on screen
+    if (fwd < 200) return null;         // behind or too near the camera
+    var sc = CAM.f / fwd;
+    return {x: cv.width / 2 + rx * sc, y: cv.height * 0.50 - up * sc,
+            s: sc, d: fwd};
+  }
+
+  function line(a, b, col, w) {
+    var p = project(a[0], a[1], a[2] || 0), q = project(b[0], b[1], b[2] || 0);
+    if (!p || !q) return;
+    ctx.strokeStyle = col; ctx.lineWidth = w || 1.5;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+  }
+
+  function drawPitch() {
+    var lin = css('--line');
+    var hw = W / 2, hh = H / 2;
+    line([-hw, -hh], [hw, -hh], lin, 2);
+    line([-hw, hh], [hw, hh], lin, 2);
+    line([-hw, -hh], [-hw, hh], lin, 2);
+    line([hw, -hh], [hw, hh], lin, 2);
+    line([-hw, 0], [hw, 0], lin, 2);
+    // centre circle
+    var prev = null;
+    for (var a = 0; a <= 32; a++) {
+      var th = a / 32 * 6.2832;
+      var pt = [Math.cos(th) * 920, Math.sin(th) * 920];
+      if (prev) line(prev, pt, lin, 1);
+      prev = pt;
+    }
+    // goals, drawn as real 3D frames so the perspective reads
+    [[-hh, css('--good'), 'your net'], [hh, css('--bad'), 'their net']]
+      .forEach(function (g) {
+        var y = g[0], col = g[1];
+        line([-893, y, 0], [-893, y, 642], col, 3);
+        line([893, y, 0], [893, y, 642], col, 3);
+        line([-893, y, 642], [893, y, 642], col, 3);
+        line([-893, y, 0], [893, y, 0], col, 3);
+      });
+  }
+
+  function drawCar(x, y, z, head, col, me, name) {
+    var p = project(x, y, z + 17);
+    if (!p) return;
+    var len = 118 * p.s, wid = 84 * p.s, hgt = 36 * p.s;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    // Yaw only: the camera looks down the pitch, so heading is the rotation
+    // that reads. Roll and pitch of the car are invisible at this scale.
+    ctx.rotate(-(head * Math.PI / 180) * flip * 0.55);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-len / 2, -wid / 2, len, wid, 3 * p.s);
+    else ctx.rect(-len / 2, -wid / 2, len, wid);
+    ctx.fill();
+    ctx.globalAlpha = 0.55;
+    ctx.fillRect(-len / 6, -wid / 2, len / 2.6, wid);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    if (me) {
+      ctx.strokeStyle = css('--ink');
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.75, 0, 6.2832);
+      ctx.stroke();
+    }
+    if (z > 120) {                       // shadow, so height is readable
+      var g = project(x, y, 0);
+      if (g) {
+        ctx.globalAlpha = 0.25;
+        ctx.fillStyle = css('--ink-3');
+        ctx.beginPath(); ctx.ellipse(g.x, g.y, len / 2, wid / 3, 0, 0, 6.2832);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.fillStyle = me ? css('--accent') : css('--ink-3');
+    ctx.font = Math.max(9, 11 * p.s * 40) + 'px ui-monospace, monospace';
+    ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
+  }
 
   function draw() {
     var f = T.frames[i];
     ctx.clearRect(0, 0, cv.width, cv.height);
+    drawPitch();
 
-    ctx.strokeStyle = css('--line'); ctx.lineWidth = 2;
-    ctx.strokeRect(X(-W / 2), Y(H / 2), X(W / 2) - X(-W / 2), Y(-H / 2) - Y(H / 2));
-    ctx.beginPath(); ctx.moveTo(X(-W / 2), Y(0)); ctx.lineTo(X(W / 2), Y(0)); ctx.stroke();
-    ctx.beginPath(); ctx.arc(X(0), Y(0), Math.abs(X(1000) - X(0)), 0, 6.284); ctx.stroke();
-
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = css('--good');
-    ctx.beginPath(); ctx.moveTo(X(-893), Y(H / 2)); ctx.lineTo(X(893), Y(H / 2)); ctx.stroke();
-    ctx.strokeStyle = css('--bad');
-    ctx.beginPath(); ctx.moveTo(X(-893), Y(-H / 2)); ctx.lineTo(X(893), Y(-H / 2)); ctx.stroke();
-
-    ctx.fillStyle = css('--ink-3');
-    ctx.font = '12px ui-monospace, monospace';
-    ctx.fillText('their net', X(-500), Y(H / 2) - 14);
-    ctx.fillText('your net', X(-480), Y(-H / 2) + 24);
-
-    for (var c = 0; c < T.names.length; c++) {
-      var x = f[4 + c * 2], y = f[5 + c * 2];
+    // Painter's algorithm: furthest first, or near cars vanish behind far ones.
+    var items = [];
+    for (var c = 0; c < N; c++) {
+      var o = 4 + c * STRIDE;
+      var x = f[o], y = f[o + 1];
       if (x === 0 && y === 0) continue;
-      var mine = T.teams[c] === T.my_team;
-      var me = c === T.me;
-      ctx.beginPath();
-      ctx.arc(X(x), Y(y), me ? 11 : 8, 0, 6.284);
-      ctx.fillStyle = me ? css('--accent') : (mine ? css('--blue') : css('--orange'));
-      ctx.fill();
-      if (me) { ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2; ctx.stroke(); }
-      ctx.fillStyle = css('--ink-2');
-      ctx.font = '11px ui-monospace, monospace';
-      ctx.fillText(T.names[c].slice(0, 12), X(x) + 14, Y(y) + 4);
+      items.push({d: (y * flip), kind: 'car', c: c, x: x, y: y,
+                  z: f[o + 2], h: f[o + 3]});
     }
+    items.push({d: f[2] * flip, kind: 'ball', x: f[1], y: f[2], z: f[3]});
+    items.sort(function (a, b) { return b.d - a.d; });
 
-    // Ball grows with height, so an aerial ball is visible in a plan view.
-    ctx.beginPath();
-    ctx.arc(X(f[1]), Y(f[2]), 6 + Math.min(f[3], 2000) / 260, 0, 6.284);
-    ctx.fillStyle = css('--ink');
-    ctx.fill();
+    items.forEach(function (it) {
+      if (it.kind === 'ball') {
+        var p = project(it.x, it.y, it.z);
+        if (!p) return;
+        if (it.z > 120) {
+          var g = project(it.x, it.y, 0);
+          if (g) {
+            ctx.globalAlpha = 0.25; ctx.fillStyle = css('--ink-3');
+            ctx.beginPath(); ctx.ellipse(g.x, g.y, 92 * p.s, 40 * p.s, 0, 0, 6.2832);
+            ctx.fill(); ctx.globalAlpha = 1;
+          }
+        }
+        ctx.fillStyle = css('--ink');
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, 92 * p.s), 0, 6.2832);
+        ctx.fill();
+      } else {
+        var mine = T.teams[it.c] === T.my_team;
+        drawCar(it.x, it.y, it.z, it.h,
+                it.c === T.me ? css('--accent')
+                              : (mine ? css('--blue') : css('--orange')),
+                it.c === T.me, T.names[it.c]);
+      }
+    });
 
-    clock.textContent = f[0].toFixed(1) + 's';
+    clock.textContent = f[0].toFixed(1) + 's' + (rate !== 1 ? '  ' + rate + 'x' : '');
   }
 
   function seek(n) {
@@ -447,38 +547,103 @@ VIEWER_JS = r"""
     range.value = i;
     draw();
   }
-  range.max = T.frames.length - 1;
-  range.addEventListener('input', function () { seek(+range.value); });
-  play.addEventListener('click', function () {
-    if (timer) { clearInterval(timer); timer = null; play.textContent = 'Play'; return; }
-    play.textContent = 'Pause';
-    timer = setInterval(function () {
-      if (i >= T.frames.length - 1) {
-        clearInterval(timer); timer = null; play.textContent = 'Play'; return;
-      }
-      seek(i + 1);
-    }, 1000 * (T.frames[T.frames.length - 1][0] - T.frames[0][0]) /
-       Math.max(T.frames.length - 1, 1));
-  });
-  // Seek by the timestamp each frame carries, NOT by t * hz. The downsample
-  // step is an integer, so the real rate is 9.48 Hz where hz says 10, and
-  // multiplying drifts ~5% -- an 18 second miss three minutes into a match.
-  function seekTime(t) {
+  // Seek by the timestamp each frame carries, NOT t * hz: the downsample step
+  // is an integer, so the real rate drifts from the nominal one and three
+  // minutes in that is an 18 second miss.
+  function frameAt(t) {
     var lo = 0, hi = T.frames.length - 1;
     while (lo < hi) {
       var mid = (lo + hi) >> 1;
       if (T.frames[mid][0] < t) lo = mid + 1; else hi = mid;
     }
-    seek(lo);
+    return lo;
   }
-  document.querySelectorAll('.moments button').forEach(function (b) {
-    b.addEventListener('click', function () { seekTime(+b.dataset.t); });
+
+  var STEP_MS = 1000 * (T.frames[T.frames.length - 1][0] - T.frames[0][0]) /
+                Math.max(T.frames.length - 1, 1);
+
+  function nextMoment(t) {
+    for (var k = 0; k < T.moments.length; k++) {
+      if (T.moments[k].t > t + 0.05) return T.moments[k];
+    }
+    return null;
+  }
+  function momentAt(t) {
+    for (var k = 0; k < T.moments.length; k++) {
+      var m = T.moments[k];
+      if (t >= m.t && t <= m.t + (T.slow || 6)) return m;
+    }
+    return null;
+  }
+
+  function tick() {
+    if (i >= T.frames.length - 1) { stop(); return; }
+    seek(i + 1);
+    var t = T.frames[i][0];
+    if (guided) {
+      var m = momentAt(t);
+      if (m) {
+        rate = 0.25;
+        caption.hidden = false;
+        caption.innerHTML = '<b>' + m.title + '</b>' + m.text;
+        caption.className = 'caption ' + m.kind;
+      } else {
+        rate = 4;
+        caption.hidden = true;
+        // Nothing is happening -- skip ahead to the next thing that is.
+        var nm = nextMoment(t);
+        if (nm && nm.t - t > 3) seek(frameAt(nm.t - 1.5));
+      }
+      restart();
+    }
+  }
+  function restart() {
+    if (!timer) return;
+    clearInterval(timer);
+    timer = setInterval(tick, STEP_MS / rate);
+  }
+  function stop() {
+    clearInterval(timer); timer = null; guided = false; rate = 1;
+    play.textContent = 'Play'; guide.textContent = 'Guided run-through';
+    caption.hidden = true;
+  }
+  function start() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(tick, STEP_MS / rate);
+  }
+
+  play.addEventListener('click', function () {
+    if (timer && !guided) { stop(); return; }
+    guided = false; rate = 1; caption.hidden = true;
+    play.textContent = 'Pause'; guide.textContent = 'Guided run-through';
+    start();
+  });
+  guide.addEventListener('click', function () {
+    if (timer && guided) { stop(); return; }
+    guided = true; rate = 4;
+    play.textContent = 'Play'; guide.textContent = 'Stop';
+    if (T.moments.length) seek(frameAt(Math.max(0, T.moments[0].t - 1.5)));
+    start();
+  });
+  range.max = T.frames.length - 1;
+  range.addEventListener('input', function () {
+    stop(); seek(+range.value);
+  });
+  [].slice.call(document.querySelectorAll('.moments button')).forEach(function (b) {
+    b.addEventListener('click', function () {
+      stop();
+      seek(frameAt(+b.dataset.t));
+      caption.hidden = false;
+      caption.className = 'caption ' + b.dataset.kind;
+      caption.innerHTML = '<b>' + b.dataset.title + '</b>' + b.dataset.text;
+    });
   });
 
   function size() {
     var w = cv.parentElement.clientWidth;
+    if (!w) return;
     cv.width = w;
-    cv.height = Math.round(w * 1.15);
+    cv.height = Math.round(Math.min(w * 0.72, 560));
     draw();
   }
   window.addEventListener('resize', size);
@@ -1014,21 +1179,28 @@ def build(payload, refresh=0) -> str:
           % esc(latest.get("date") or ""))
         a('<div class="viewer"><div>')
         a('<canvas id="pitch"></canvas>')
-        a('<div class="ctrl"><button id="play" type="button">Play</button>'
+        a('<div class="ctrl">'
+          '<button id="guide" type="button">Guided run-through</button>'
+          '<button id="play" type="button" class="ghost">Play</button>'
           '<input id="scrub" type="range" min="0" value="0" '
           'aria-label="scrub the replay">'
           '<span class="clock" id="clock">0.0s</span></div>')
+        a('<div class="caption" id="caption" hidden></div>')
         a('<p style="color:var(--ink-3);font-size:.82rem;max-width:64ch">'
-          "Plan view at %d Hz. Your net is always at the bottom whichever side "
-          "you played. The ball grows with height, so an aerial reads as a "
-          "bigger circle. You are the highlighted dot.</p>" % track.get("hz", 10))
+          "Guided run-through skips the quiet stretches at 4x and drops to "
+          "0.25x on every moment worth reviewing, with what went wrong on "
+          "screen. Your net is always the near one whichever side you played. "
+          "Cars and ball cast a shadow when airborne, so height reads.</p>")
         a("</div>")
         a('<div><div class="eyebrow" style="margin-bottom:8px">Jump to</div>'
           '<div class="moments">')
         for mo in track.get("moments", []):
-            a('<button type="button" class="%s" data-t="%s"><b>%d:%02d</b>%s</button>'
-              % (esc(mo["kind"]), mo["t"], int(mo["t"] // 60), int(mo["t"] % 60),
-                 esc(mo["text"])))
+            a('<button type="button" class="%s" data-t="%s" data-kind="%s" '
+              'data-title="%s" data-text="%s"><b>%d:%02d</b>%s</button>'
+              % (esc(mo["kind"]), mo["t"], esc(mo["kind"]),
+                 esc(mo.get("title", "")), esc(mo["text"]),
+                 int(mo["t"] // 60), int(mo["t"] % 60),
+                 esc(mo.get("title") or mo["text"])))
         a("</div></div></div>")
         a("<script>window.__TRACK__=%s;</script>" % json.dumps(track))
     else:
