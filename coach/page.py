@@ -798,7 +798,8 @@ VIEWER_JS = r"""
     //
     // Correlational, not causal: a deeper defender may partly reflect a less
     // dangerous attack. It is still this player's own record of what held.
-    var SHADOW_DEPTH = 0.23, SHADOW_LATERAL = 0.35;
+    var SH = T.shadow || {};
+    var SHADOW_DEPTH = SH.depth || 0.23, SHADOW_LATERAL = SH.lateral || 0.35;
     var sx = f.ball[0] * SHADOW_LATERAL;
     var sy = ownY + (f.ball[1] - ownY) * SHADOW_DEPTH;
     var g = project(sx, sy, 0);
@@ -1268,6 +1269,42 @@ def rank_block(rank):
     return "\n".join(o)
 
 
+def shadow_note(track):
+    """Where the 'be here' marker's numbers came from, in the page itself."""
+    sh = (track or {}).get("shadow") or {}
+    if not sh.get("depth"):
+        return ('<p style="color:var(--ink-3);font-size:.78rem;max-width:66ch">'
+                "&ldquo;Where you should be&rdquo; is using a fallback value. "
+                "Run <code>python coach/shadow.py</code> to measure it from "
+                "your own replays.</p>")
+    bits = [
+        "&ldquo;Where you should be&rdquo; is measured, not a coaching "
+        "clich&eacute;. Across %d of your matches the covering defender sat "
+        "<b>%.0f%%</b> of the way from their net to the ball on attacks that "
+        "were held (n=%s), against <b>%.0f%%</b> on attacks conceded (n=%s). "
+        "The marker uses the figure that held."
+        % (sh.get("matches", 0), 100 * sh["depth"], f"{sh.get('n_held', 0):,}",
+           100 * sh.get("depth_conceded", 0), f"{sh.get('n_conceded', 0):,}")
+    ]
+    pro = sh.get("pro")
+    if pro:
+        arrow = "deeper" if pro["depth"] < sh["depth"] else "further up"
+        bits.append(
+            "For comparison, %s players sit at <b>%.0f%%</b> (%d matches "
+            "sampled from ballchasing.com, measured with the same code) "
+            "&mdash; %.0f points %s than you."
+            % (esc(pro["rank"].replace("-", " ")), 100 * pro["depth"],
+               pro.get("matches", 0),
+               abs(100 * (pro["depth"] - sh["depth"])), arrow))
+    else:
+        bits.append(
+            "No higher-rank benchmark yet &mdash; add a ballchasing.com API "
+            "key and run <code>python coach/pro.py</code> to compare against "
+            "Grand Champion play.")
+    return ('<p style="color:var(--ink-3);font-size:.78rem;max-width:70ch">'
+            + " ".join(bits) + "</p>")
+
+
 def heat_block(grid, grid_max, label_html):
     # label_html is trusted markup built here, NOT user text. Escaping it turned
     # "2v2 &middot; 86 matches" into a literal "2V2 &MIDDOT; 86 MATCHES" on the
@@ -1568,13 +1605,7 @@ def build(payload, refresh=0) -> str:
           '<span><i class="sw bad"></i>beaten &mdash; get home</span>'
           '<span><i class="sw ghost"></i>where you should be</span>'
           "</div>")
-        a('<p style="color:var(--ink-3);font-size:.78rem;max-width:66ch">'
-          "&ldquo;Where you should be&rdquo; is measured from your own replays, "
-          "not from a coaching clich&eacute;: across 40 matches, the covering "
-          "defender sat 23% of the way from their net to the ball on attacks "
-          "that were <b>held</b> (n=5,811) versus 32% on attacks that were "
-          "<b>conceded</b> (n=687), and stayed more central with it. The marker "
-          "uses the figure that held.</p>")
+        a(shadow_note(track))
         a('<p style="color:var(--ink-3);font-size:.82rem;max-width:66ch">'
           "Colour is the team, never the player &mdash; you are your side's "
           "colour with a ring around you. Guided run-through skips quiet play "

@@ -22,3 +22,7 @@ tools/rrrocket/
 
 # Third-party binary, not ours to redistribute. Fetch from rlbot.org.
 RLArenaCollisionDumper.exe
+
+# ballchasing API key -- yours, identifies your account. Never commit.
+coach/ballchasing.key
+coach/.pro-replays/

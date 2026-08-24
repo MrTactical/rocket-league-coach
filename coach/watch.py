@@ -239,6 +239,34 @@ def rebuild(cache, out_path):
     }
     payload["player"] = current_name(payload["matches"], payload["player"])
     payload["track"] = cache.get("track")
+    # The 'be here' marker takes its position from measurement, not a constant.
+    # Both files are optional: without them the marker falls back and says so.
+    if payload["track"]:
+        me = ROOT / "coach" / "shadow-me.json"
+        pro = ROOT / "coach" / "pro-benchmark.json"
+        sh = {}
+        if me.is_file():
+            try:
+                d = json.loads(me.read_text(encoding="utf-8"))
+                sh = {"depth": d.get("depth_held"),
+                      "lateral": d.get("lateral_held"),
+                      "depth_conceded": d.get("depth_conceded"),
+                      "n_held": d.get("n_held"), "n_conceded": d.get("n_conceded"),
+                      "matches": d.get("matches")}
+            except Exception:
+                sh = {}
+        if sh and pro.is_file():
+            try:
+                pd = json.loads(pro.read_text(encoding="utf-8"))
+                best = sorted(pd.items())[-1] if pd else None
+                if best:
+                    sh["pro"] = {"rank": best[0],
+                                 "depth": best[1].get("depth_held"),
+                                 "matches": best[1].get("matches")}
+            except Exception:
+                pass
+        if sh:
+            payload["track"]["shadow"] = sh
     rank_path = RANK
     if rank_path.is_file():
         try:
