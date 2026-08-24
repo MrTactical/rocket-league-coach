@@ -1283,14 +1283,27 @@ def shadow_note(track):
                 "your own replays.</p>")
 
     size = sh.get("team_size") or 3
-    bits = ["&ldquo;Where you should be&rdquo; is measured, not a coaching "
-            "clich&eacute;. Across %d of your %dv%d matches the covering "
-            "defender sat <b>%.0f%%</b> of the way from their net to the ball "
-            "on attacks that were held (n=%s), against <b>%.0f%%</b> on "
-            "attacks conceded (n=%s)."
-            % (sh.get("matches", 0), size, size, 100 * sh["depth"],
-               f"{sh.get('n_held', 0):,}", 100 * sh.get("depth_conceded", 0),
-               f"{sh.get('n_conceded', 0):,}")]
+    bits = ["&ldquo;Where you should be&rdquo; is measured across %d of your "
+            "%dv%d matches (n=%s frames under attack)."
+            % (sh.get("matches", 0), size, size, f"{sh.get('n_held', 0):,}")]
+
+    if sh.get("depth_meaningful"):
+        bits.append(
+            "The covering defender sat <b>%.0f%%</b> of the way from their net "
+            "to the ball on attacks held, against <b>%.0f%%</b> conceded."
+            % (100 * sh["depth"], 100 * sh.get("depth_conceded", 0)))
+    else:
+        bits.append(
+            "How <i>deep</i> you sit turns out not to predict the outcome: "
+            "%.0f%% held against %.0f%% conceded, a gap of %.2f. An earlier "
+            "run on a quarter of this data showed 0.10 and looked like the "
+            "finding &mdash; it did not survive the bigger sample, so the "
+            "marker no longer claims it. What still separates is where you "
+            "sit <i>across</i> the pitch: %.0f%% of the ball's offset when "
+            "holding, %.0f%% when conceding."
+            % (100 * sh["depth"], 100 * sh.get("depth_conceded", 0),
+               sh.get("separation", 0), 100 * (sh.get("lateral") or 0),
+               100 * (sh.get("lateral_conceded") or 0)))
 
     pro = sh.get("pro")
     if pro and pro.get("depth"):
