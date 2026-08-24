@@ -371,6 +371,16 @@ code{font-family:"IBM Plex Mono",monospace;background:var(--surface-2);
 .legend .sw.bad{border-radius:50%;background:none;border:2px solid var(--bad)}
 .legend .sw.ghost{border-radius:50%;background:none;
   border:2px dashed var(--accent)}
+.live{margin-top:10px;padding:10px 14px;border-radius:3px;font-size:.86rem;
+  background:var(--surface);border:1px solid var(--line);
+  border-left:3px solid var(--ink-3);color:var(--ink-2);max-width:78ch}
+.live[hidden]{display:none}
+.live b{display:block;color:var(--ink);font-size:.95rem;margin-bottom:2px}
+.live span{display:block;color:var(--ink-2)}
+.live.sev1{border-left-color:var(--warn)}
+.live.sev1 b{color:var(--warn)}
+.live.sev2{border-left-color:var(--bad);background:var(--surface-2)}
+.live.sev2 b{color:var(--bad)}
 """
 
 
@@ -425,6 +435,8 @@ VIEWER_JS = r"""
   var guide = document.getElementById('guide');
   var clock = document.getElementById('clock');
   var caption = document.getElementById('caption');
+  var live = document.getElementById('live');
+  var pausedAt = -99, prevBall = null;
   var playing = false, guided = false, rate = 1, raf = null, last = 0;
   var T0 = T.frames[0][0], T1 = T.frames[T.frames.length - 1][0];
   var cursor = T0;                       // playback head, in seconds (float)
@@ -626,11 +638,13 @@ VIEWER_JS = r"""
     ctx.globalAlpha = 1;
     if (me) {
       // Two rings, light over dark, so it reads on any surface behind it.
-      ctx.strokeStyle = css('--ink'); ctx.lineWidth = 3.5;
-      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.95, 0, 6.2832);
-      ctx.stroke();
-      ctx.strokeStyle = css('--surface'); ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.95, 0, 6.2832);
+      // Sized off the car, and kept clear of it. A fixed 3.5px ring is
+      // thicker than the car itself when the camera is close, which read as
+      // a white car rather than a ringed blue one.
+      var rr = Math.max(len, wid) * 0.95 + 5;
+      ctx.strokeStyle = css('--ink');
+      ctx.lineWidth = Math.max(1.5, Math.min(3, rr * 0.09));
+      ctx.beginPath(); ctx.arc(p.x, p.y, rr, 0, 6.2832);
       ctx.stroke();
     }
     ctx.fillStyle = me ? css('--ink') : css('--ink-3');
@@ -650,6 +664,103 @@ VIEWER_JS = r"""
   //   HOME      an arrow from your car to your net while you are beaten,
   //             because the measured fault is not being out of position, it
   //             is not turning around.
+  // --- live read of what is happening right now --------------------------
+  // The markers show WHERE; this says WHY. Everything below is computed from
+  // the frame on screen, and every rule is one this analyser measured on this
+  // player rather than general advice.
+  //
+  // Severity 2 is reserved for the specific compound failure the numbers say
+  // costs the goals: beaten, nobody covering, and the ball travelling toward
+  // your net. That combination pauses the guided run.
+  var GOAL_MOUTH = 893;
+
+  function readFrame(f, prevBall) {
+    var me = f.cars[T.me];
+    if (!me) return null;
+    var sgn = T.my_team === 1 ? -1 : 1;
+    var ownY = -5120 * sgn;
+    var notes = [], sev = 0;
+
+    var goalSide = (me[1] * sgn) < (f.ball[1] * sgn);
+    var distNet = Math.abs(me[1] - ownY);
+    var ballToNet = Math.abs(f.ball[1] - ownY);
+
+    // Who else is home, and who is nearest the ball.
+    var coverBehind = 0, mateNames = [], closest = null, closestD = 1e9;
+    for (var c = 0; c < N; c++) {
+      var k = f.cars[c];
+      if (!k) continue;
+      var d = Math.hypot(k[0] - f.ball[0], k[1] - f.ball[1]);
+      if (d < closestD) { closestD = d; closest = c; }
+      if (c !== T.me && T.teams[c] === T.my_team &&
+          (k[1] * sgn) < (f.ball[1] * sgn)) {
+        coverBehind++; mateNames.push(T.names[c]);
+      }
+    }
+    var iAmClosest = closest === T.me;
+
+    // Is the ball being driven at your goal?
+    var incoming = false, ballSpeed = 0;
+    if (prevBall) {
+      var vy = (f.ball[1] - prevBall[1]);
+      incoming = (vy * sgn) < 0;                 // travelling toward our net
+      ballSpeed = Math.hypot(f.ball[0] - prevBall[0], vy);
+    }
+
+    if (!goalSide) {
+      notes.push('The ball is goal-side of you — you are beaten.');
+      sev = Math.max(sev, 1);
+      if (coverBehind === 0) {
+        notes.push('Nobody on your team is between the ball and your net.');
+        sev = Math.max(sev, incoming && ballToNet < 6000 ? 2 : 1);
+      } else {
+        notes.push(mateNames[0] + ' is covering behind the ball.');
+      }
+      if (incoming && ballSpeed > 12) {
+        notes.push('And it is moving toward your goal.');
+      }
+      notes.push('You are ' + Math.round(distNet) +
+                 ' uu from your net. Turn and drive at it — not at the ball.');
+    } else if (iAmClosest && coverBehind === 0) {
+      notes.push('You are first to the ball with no cover behind you.');
+      notes.push('If this challenge does not win it, the net is open. ' +
+                 'Delay and shepherd instead.');
+      sev = Math.max(sev, 1);
+    } else {
+      // Double commit: you and a team-mate both on the ball.
+      for (var c2 = 0; c2 < N; c2++) {
+        var k2 = f.cars[c2];
+        if (!k2 || c2 === T.me || T.teams[c2] !== T.my_team) continue;
+        var dBall = Math.hypot(k2[0] - f.ball[0], k2[1] - f.ball[1]);
+        var dMe = Math.hypot(k2[0] - me[0], k2[1] - me[1]);
+        var myBall = Math.hypot(me[0] - f.ball[0], me[1] - f.ball[1]);
+        if (dBall < 1800 && myBall < 1800 && dMe < 1200) {
+          notes.push('You and ' + T.names[c2] +
+                     ' are both on the ball — double committed.');
+          notes.push('One of you should peel off; whoever is further from ' +
+                     'your net has the easier exit.');
+          sev = Math.max(sev, 1);
+        }
+      }
+    }
+
+    if (!notes.length) {
+      notes.push(goalSide ? 'Goal-side of the ball. Shape is fine here.'
+                          : 'Nothing notable.');
+    }
+    return {sev: sev, notes: notes, goalSide: goalSide, distNet: distNet};
+  }
+
+  function paintLive(r) {
+    if (!live) return;
+    if (!r) { live.hidden = true; return; }
+    live.hidden = false;
+    live.className = 'live sev' + r.sev;
+    live.innerHTML = r.notes.map(function (n, k) {
+      return k === 0 ? '<b>' + n + '</b>' : '<span>' + n + '</span>';
+    }).join('');
+  }
+
   function drawOverlay(f) {
     var me = f.cars[T.me];
     if (!me) return;
@@ -752,6 +863,19 @@ VIEWER_JS = r"""
       }
     });
 
+    var read = readFrame(f, prevBall);
+    prevBall = f.ball.slice();
+    paintLive(read);
+    // A severity-2 read is the compound failure the numbers say costs goals.
+    // Stop on it once, so it can be read rather than scrolled past -- but only
+    // during the guided run, and never twice for the same incident.
+    if (read && read.sev === 2 && guided && playing && t - pausedAt > 8) {
+      pausedAt = t;
+      setCaption({kind: 'conceded', title: 'Stop here — this is the mistake',
+                  text: read.notes.join(' ')});
+      pause();
+    }
+
     clock.textContent = t.toFixed(1) + 's' + (rate !== 1 ? '   ' + rate + 'x' : '');
     range.value = String(Math.round((t - T0) * 100));
   }
@@ -822,6 +946,12 @@ VIEWER_JS = r"""
     playing = true; last = performance.now();
     raf = requestAnimationFrame(loop);
   }
+  function pause() {
+    playing = false;
+    if (raf) cancelAnimationFrame(raf);
+    raf = null;
+    guide.textContent = 'Resume run-through';
+  }
   function stop() {
     playing = false; guided = false; rate = 1;
     if (raf) cancelAnimationFrame(raf);
@@ -839,6 +969,9 @@ VIEWER_JS = r"""
   });
   guide.addEventListener('click', function () {
     if (playing && guided) { stop(); return; }
+    if (!playing && guided) {          // resume after an auto-pause
+      guide.textContent = 'Stop'; setCaption(null); start(); return;
+    }
     stop();
     guided = true; rate = 4;
     guide.textContent = 'Stop';
@@ -1408,6 +1541,7 @@ def build(payload, refresh=0) -> str:
           '<input id="scrub" type="range" min="0" value="0" '
           'aria-label="scrub the replay">'
           '<span class="clock" id="clock">0.0s</span></div>')
+        a('<div class="live" id="live" hidden></div>')
         a('<div class="caption" id="caption" hidden></div>')
         a('<div class="legend">'
           '<span><i class="sw blue"></i>your team</span>'
