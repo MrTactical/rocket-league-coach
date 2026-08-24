@@ -102,6 +102,10 @@ def summarise(held, conceded):
         "lateral_conceded": _median(cl) or 0.0,
         "n_held": len(hd),
         "n_conceded": len(cd),
+        # How far apart holding and conceding actually are. If this is small
+        # the measurement does not discriminate, and a marker drawn from it
+        # would be decoration wearing the clothes of advice.
+        "separation": abs((_median(cd) or 0.0) - (_median(hd) or 0.0)),
     }
 
 
@@ -135,6 +139,7 @@ def measure_local(limit=60, team_size=None, verbose=True):
         print("measured %d of your matches" % used)
     out = summarise(held, conceded)
     out["matches"] = used
+    out["team_size"] = team_size
     return out
 
 

@@ -46,6 +46,7 @@ from coach.analyse import analyse_match, discover  # noqa: E402
 from coach.page import build  # noqa: E402
 from coach.mmrlog import LIVE_LOG, PLAYLISTS, read_all_logs  # noqa: E402
 from coach.timeline import DEMOS, load, save_replay_hint  # noqa: E402
+from coach.shadow import measure_local  # noqa: E402
 from coach.viewer import build_track  # noqa: E402
 
 # Beside the exe when frozen; the bundle dir is a temp folder that vanishes on
@@ -61,6 +62,7 @@ DATA = Path(sys.executable).parent if FROZEN else ROOT / "coach"
 REPORT = (DATA if FROZEN else ROOT) / "coach-report.html"
 CACHE = DATA / ".replay-cache.json"
 RANK = DATA / "rank.json"
+KEY_HINT_SHOWN = False
 REFRESH_SECS = 30    # how often the written page re-loads itself
 
 
@@ -234,6 +236,84 @@ def refresh_mmr():
     return changed, last
 
 
+SHADOW_EVERY = 10       # re-measure your own positioning every N new matches
+
+
+def refresh_shadow(cache, force=False):
+    """
+    Keep the 'be here' marker measured rather than assumed.
+
+    Re-runs only every SHADOW_EVERY matches: it re-parses your recent replays,
+    which costs a few seconds, and the median barely moves match to match.
+    """
+    me = DATA / "shadow-me.json"
+    n = len([e for e in cache["entries"].values() if e.get("sections")])
+    last = cache.get("shadow_at", -99)
+    if not force and me.is_file() and n - last < SHADOW_EVERY:
+        return False
+    # Measure the format being played. Mixed together, 2v2 and 3v3 gave 0.30
+    # held against 0.35 conceded -- a blur of two different games. Apart, 3v3
+    # separates cleanly (0.23 vs 0.33) and 2v2 does not separate at all
+    # (0.35 vs 0.36).
+    recent = [e for e in cache["entries"].values() if e.get("sections")]
+    recent.sort(key=lambda e: e.get("date") or "")
+    size = (recent[-1].get("team_size") if recent else 3) or 3
+    try:
+        out = measure_local(limit=60, team_size=size, verbose=False)
+    except Exception:
+        return False
+    if not out.get("n_held"):
+        return False
+    me.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    cache["shadow_at"] = n
+    print("  ~ shadow position, %dv%d, %d matches: %.2f held vs %.2f conceded%s"
+          % (size, size, out.get("matches", 0), out["depth_held"],
+             out["depth_conceded"],
+             "" if out.get("separation", 0) >= 0.05
+             else "  (too close to coach from)"))
+    return True
+
+
+def fetch_benchmark_once():
+    """
+    Pull a higher-rank benchmark if a ballchasing key has appeared and we have
+    not fetched one yet. Runs at most once per start: it is a few dozen
+    downloads against a rate-limited free tier, not something to poll.
+    """
+    out = DATA / "pro-benchmark.json"
+    if out.is_file():
+        return
+    try:
+        from coach.pro import api_key, collect
+        from coach.shadow import summarise
+    except Exception:
+        return
+    key = api_key()
+    if not key:
+        return
+    print("  ballchasing key found -- fetching a Grand Champion benchmark")
+    print("  (about 25 downloads, roughly half a minute)")
+    try:
+        raw = collect("grand-champion", 25, "ranked-standard", key,
+                      verbose=False)
+    except SystemExit as e:
+        print("  benchmark skipped: %s" % e)
+        return
+    except Exception as e:
+        print("  benchmark skipped: %s" % str(e)[:80])
+        return
+    if not raw.get("matches"):
+        print("  benchmark skipped: no usable replays came back")
+        return
+    st = summarise(raw["held"], raw["conceded"])
+    st["matches"] = raw["matches"]
+    st["fetched"] = time.strftime("%Y-%m-%d")
+    out.write_text(json.dumps({"grand-champion": st}, indent=2),
+                   encoding="utf-8")
+    print("  benchmark: grand champion sits at %.2f (n=%d) over %d matches"
+          % (st["depth_held"], st["n_held"], st["matches"]))
+
+
 def rebuild(cache, out_path):
     # Entries recorded only so a file is never retried are bookkeeping, not
     # matches. Counting them gave a header reading "93 matches - 4W / 3L".
@@ -259,7 +339,11 @@ def rebuild(cache, out_path):
                       "lateral": d.get("lateral_held"),
                       "depth_conceded": d.get("depth_conceded"),
                       "n_held": d.get("n_held"), "n_conceded": d.get("n_conceded"),
-                      "matches": d.get("matches")}
+                      "matches": d.get("matches"),
+                      "team_size": d.get("team_size"),
+                      # The viewer hides the marker below this: a position that
+                      # does not tell holding from conceding is not advice.
+                      "usable": (d.get("separation") or 0) >= 0.05}
             except Exception:
                 sh = {}
         if sh and pro.is_file():
@@ -482,6 +566,8 @@ def sweep(cache, modules, out_path, verbose):
     if done or absent:
         save_cache(cache)
     if done:
+        refresh_shadow(cache)
+        save_cache(cache)
         total = rebuild(cache, out_path)
         print("  page rebuilt from %d matches -> %s" % (total, out_path))
     return done
@@ -530,7 +616,15 @@ def main() -> int:
     print("  %d replays already seen, %d metric families loaded"
           % (len(cache["entries"]), len(modules)))
     print("  " + save_replay_hint())
+    if not (DATA / "pro-benchmark.json").is_file() and not KEY_HINT_SHOWN:
+        from coach.pro import api_key as _k
+        if not _k():
+            print("  no ballchasing key yet -- drop one in coach/ballchasing.key")
+            print("  (ballchasing.com/upload) to benchmark against a higher rank")
     print()
+    fetch_benchmark_once()
+    refresh_shadow(cache)
+    save_cache(cache)
 
     if args.auto:
         auto_loop(cache, modules, args.out, args.verbose, args.interval)

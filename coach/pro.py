@@ -1,7 +1,8 @@
 """
 Benchmark your positioning against a higher rank, using real replays.
 
-    python coach/pro.py --rank grand-champion --count 30
+    python coach/pro.py --rank grand-champion --count 30   # a rank to beat
+    python coach/pro.py --mine --count 150                 # your own history
     python coach/pro.py --show
 
 Needs a ballchasing.com API key: sign in there with Steam and copy the key from
@@ -74,18 +75,31 @@ def _get(path, params=None, binary=False, key=None):
     return data if binary else json.loads(data)
 
 
-def collect(rank, count, playlist="ranked-standard", key=None, verbose=True):
-    """Download `count` replays at a rank and measure them. Returns raw stats."""
+def collect(rank, count, playlist="ranked-standard", key=None, verbose=True,
+            mine=False):
+    """
+    Download `count` replays and measure them.
+
+    `mine` pulls your own uploads instead of a rank band. Worth having: a
+    ballchasing account with a thousand replays on it is a far larger and more
+    honest sample of how you play than whatever happens to be sitting in your
+    local Demos folder, which the game prunes.
+    """
     CACHE_DIR.mkdir(exist_ok=True)
-    listing = _get("/replays", {
-        "playlist": playlist, "min-rank": rank, "max-rank": rank,
-        "count": min(200, max(count * 2, count)), "sort-by": "replay-date",
-    }, key=key)
+    params = {"playlist": playlist, "count": min(200, max(count * 2, count)),
+              "sort-by": "replay-date"}
+    if mine:
+        params["uploader"] = "me"
+    else:
+        params["min-rank"] = rank
+        params["max-rank"] = rank
+    listing = _get("/replays", params, key=key)
     time.sleep(LIST_SLEEP)
 
     ids = [r["id"] for r in (listing.get("list") or [])]
     if verbose:
-        print("found %d replays at %s" % (len(ids), rank))
+        print("found %d replays (%s)"
+              % (len(ids), "your uploads" if mine else rank))
 
     held, conceded, used = [], [], 0
     for rid in ids:
@@ -119,8 +133,8 @@ def collect(rank, count, playlist="ranked-standard", key=None, verbose=True):
             print("  %2d/%d  %s  held %-5d conceded %-4d"
                   % (used, count, rid[:8], len(h), len(c)))
 
-    return {"rank": rank, "playlist": playlist, "matches": used,
-            "held": held, "conceded": conceded}
+    return {"rank": "me" if mine else rank, "playlist": playlist,
+            "matches": used, "held": held, "conceded": conceded}
 
 
 def main() -> int:
@@ -130,6 +144,8 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=25, help="replays to sample")
     ap.add_argument("--playlist", default="ranked-standard")
     ap.add_argument("--show", action="store_true", help="print the saved result")
+    ap.add_argument("--mine", action="store_true",
+                    help="measure YOUR uploaded replays instead of a rank band")
     args = ap.parse_args()
 
     if args.show:
@@ -153,7 +169,7 @@ def main() -> int:
         print("     or set the BALLCHASING_KEY environment variable")
         return 1
 
-    raw = collect(args.rank, args.count, args.playlist, key)
+    raw = collect(args.rank, args.count, args.playlist, key, mine=args.mine)
     if not raw["matches"]:
         print("No usable replays came back.")
         return 1
@@ -162,6 +178,18 @@ def main() -> int:
     stats["matches"] = raw["matches"]
     stats["playlist"] = raw["playlist"]
     stats["fetched"] = time.strftime("%Y-%m-%d")
+
+    if args.mine:
+        # Your own numbers belong where the page already looks for them.
+        me_out = ROOT / "coach" / "shadow-me.json"
+        me_out.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        print()
+        print("your %d replays from ballchasing" % raw["matches"])
+        print("  depth   held %.2f (n=%d)   conceded %.2f (n=%d)"
+              % (stats["depth_held"], stats["n_held"],
+                 stats["depth_conceded"], stats["n_conceded"]))
+        print("wrote %s" % me_out)
+        return 0
 
     saved = {}
     if OUT.is_file():
