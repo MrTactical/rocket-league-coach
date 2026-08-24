@@ -1,0 +1,51 @@
+#:schema https://rlbot.org/schemas/match.json
+# Six Allies, three a side. They coordinate within their team over match comms
+# and pool self-calibration across all six, so this is the fastest way to make
+# them better without a training rig attached.
+#
+# Watch it, or leave it running and read data/calibration.json afterwards.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "Unlimited"
+respawn_time = "OneSecond"
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-1.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-2.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-3.bot.toml"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-4.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-5.bot.toml"
+team = 1
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally-6.bot.toml"
+team = 1

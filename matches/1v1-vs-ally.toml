@@ -1,0 +1,26 @@
+#:schema https://rlbot.org/schemas/match.json
+# You vs Ally, one on one. Useful for testing how it plays at a given rank,
+# and for practising against a consistent opponent.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "FiveMinutes"
+
+[[cars]]
+type = "human"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally.bot.toml"
+team = 1

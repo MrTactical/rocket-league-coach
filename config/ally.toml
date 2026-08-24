@@ -1,0 +1,40 @@
+# Ally configuration.
+#
+# Everything here is about how the bot behaves, not how the game works --
+# physics constants live in bot/core/constants.py and should not be edited.
+
+[ally]
+
+# Skill level the bot plays at. This sets reaction time, aim error, whiff
+# rate, aerial confidence and mechanical consistency together, so it is the
+# one knob that matters most.
+#
+#   bronze | silver | gold | platinum | diamond | champion | grand_champion | ssl
+#
+# Pick your own rank, or one notch above if you want to be stretched. Even
+# "ssl" is not clean -- it still misses, misreads and loses 50/50s, just far
+# less often.
+rank = "diamond"
+
+# Fixed RNG seed for the human-error model. 0 = random each match.
+# Set a non-zero value if you want repeatable behaviour while testing.
+seed = 0
+
+# In-game quick chat callouts ("I got it!", "Rotate back!").
+# Rate-limited to roughly one message per 9 seconds.
+callouts = true
+
+# Record match telemetry to data/telemetry/ and print a coaching report at the
+# end of each match.
+telemetry = true
+
+# On-screen overlay showing the bot's current role, target and intercept.
+# Handy for understanding why it did something; turn off for clean recordings.
+rendering = true
+
+# Persist what it learns about you to data/profiles/ between matches.
+learning = true
+
+# Override which profile file to use. Leave empty to auto-detect from the
+# human player's in-game name.
+profile_name = ""

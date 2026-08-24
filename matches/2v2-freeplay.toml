@@ -1,0 +1,27 @@
+#:schema https://rlbot.org/schemas/match.json
+# You + Ally on an empty pitch, unlimited time. For working on passing plays
+# and seeing how the bot rotates around you without the pressure of a match.
+
+[rlbot]
+launcher = "Steam"
+auto_start_agents = true
+
+[match]
+game_mode = "Soccar"
+game_map_upk = "Stadium_P"
+enable_rendering = true
+enable_state_setting = true
+existing_match_behavior = "Restart"
+
+[mutators]
+match_length = "Unlimited"
+respawn_time = "OneSecond"
+
+[[cars]]
+type = "human"
+team = 0
+
+[[cars]]
+type = "rlbot"
+config_file = "../bot/ally.bot.toml"
+team = 0

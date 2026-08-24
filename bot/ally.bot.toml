@@ -1,0 +1,17 @@
+#:schema https://rlbot.org/schemas/agent.json
+[settings]
+agent_id = "joe/ally"
+name = "Ally"
+loadout_file = "loadout.toml"
+root_dir = ""
+# Single-quoted TOML literal string: backslashes are not escape sequences,
+# which is what you want for a Windows path.
+run_command = '..\venv\Scripts\python.exe ally.py'
+run_command_linux = "../venv/bin/python ally.py"
+
+[details]
+description = "An adaptive teammate that learns how you play and covers for it."
+fun_fact = "Builds a persistent profile of its partner and rotates around it."
+developer = "Joe"
+language = "Python 3"
+tags = ["teamplay"]
