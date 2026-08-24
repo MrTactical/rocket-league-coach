@@ -359,6 +359,18 @@ code{font-family:"IBM Plex Mono",monospace;background:var(--surface-2);
 .caption.conceded b{color:var(--bad)}
 .caption.scored{border-left-color:var(--good)}
 .caption.scored b{color:var(--good)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 4px;
+  font-size:.78rem;color:var(--ink-2)}
+.legend span{display:flex;align-items:center;gap:6px}
+.legend .sw{width:13px;height:13px;border-radius:3px;display:inline-block;flex:none}
+.legend .sw.blue{background:var(--blue)}
+.legend .sw.orange{background:var(--orange)}
+.legend .sw.ring{border-radius:50%;background:var(--blue);
+  box-shadow:0 0 0 2px var(--ink)}
+.legend .sw.good{border-radius:50%;background:none;border:2px solid var(--good)}
+.legend .sw.bad{border-radius:50%;background:none;border:2px solid var(--bad)}
+.legend .sw.ghost{border-radius:50%;background:none;
+  border:2px dashed var(--accent)}
 """
 
 
@@ -532,7 +544,7 @@ VIEWER_JS = r"""
       if (prev) line(prev, pt, lin, 1);
       prev = pt;
     }
-    [[-hh, css('--good')], [hh, css('--bad')]].forEach(function (g) {
+    [[-hh, css('--blue')], [hh, css('--orange')]].forEach(function (g) {
       var y = g[0], col = g[1];
       line([-893, y, 0], [-893, y, 642], col, 3);
       line([893, y, 0], [893, y, 642], col, 3);
@@ -613,11 +625,16 @@ VIEWER_JS = r"""
     ctx.restore();
     ctx.globalAlpha = 1;
     if (me) {
-      ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.8, 0, 6.2832);
+      // Two rings, light over dark, so it reads on any surface behind it.
+      ctx.strokeStyle = css('--ink'); ctx.lineWidth = 3.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.95, 0, 6.2832);
+      ctx.stroke();
+      ctx.strokeStyle = css('--surface'); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.95, 0, 6.2832);
       ctx.stroke();
     }
-    ctx.fillStyle = me ? css('--accent') : css('--ink-3');
+    ctx.fillStyle = me ? css('--ink') : css('--ink-3');
+    if (me) ctx.font = 'bold 12px ui-monospace, monospace';
     ctx.font = '11px ui-monospace, monospace';
     ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
   }
@@ -723,10 +740,14 @@ VIEWER_JS = r"""
         ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, 92 * p.s), 0, 6.2832);
         ctx.fill();
       } else {
+        // Colour says WHICH TEAM, never who you are. You used to be drawn in
+        // the accent amber while opponents were orange -- two warm hues a
+        // glance apart, and it broke the team encoding as well: your own car
+        // did not match your own side. You are now your team's colour with a
+        // ring around you.
         var mine = T.teams[it.c] === T.my_team;
         drawCar(it.p[0], it.p[1], it.p[2], it.p[3],
-                it.c === T.me ? css('--accent')
-                              : (mine ? css('--blue') : css('--orange')),
+                mine ? css('--blue') : css('--orange'),
                 it.c === T.me, T.names[it.c]);
       }
     });
@@ -1388,11 +1409,20 @@ def build(payload, refresh=0) -> str:
           'aria-label="scrub the replay">'
           '<span class="clock" id="clock">0.0s</span></div>')
         a('<div class="caption" id="caption" hidden></div>')
-        a('<p style="color:var(--ink-3);font-size:.82rem;max-width:64ch">'
-          "Guided run-through skips the quiet stretches at 4x and drops to "
-          "0.25x on every moment worth reviewing, with what went wrong on "
-          "screen. Your net is always the near one whichever side you played. "
-          "Cars and ball cast a shadow when airborne, so height reads.</p>")
+        a('<div class="legend">'
+          '<span><i class="sw blue"></i>your team</span>'
+          '<span><i class="sw orange"></i>opponents</span>'
+          '<span><i class="sw ring"></i>you</span>'
+          '<span><i class="sw good"></i>goal-side of the ball</span>'
+          '<span><i class="sw bad"></i>beaten &mdash; get home</span>'
+          '<span><i class="sw ghost"></i>where you should be</span>'
+          "</div>")
+        a('<p style="color:var(--ink-3);font-size:.82rem;max-width:66ch">'
+          "Colour is the team, never the player &mdash; you are your side's "
+          "colour with a ring around you. Guided run-through skips quiet play "
+          "at 4x and drops to 0.25x on each moment, with what went wrong on "
+          "screen. Your net is always the near one whichever side you played, "
+          "and everything casts a shadow when airborne so height reads.</p>")
         a("</div>")
         a('<div><div class="eyebrow" style="margin-bottom:8px">Jump to</div>'
           '<div class="moments">')
