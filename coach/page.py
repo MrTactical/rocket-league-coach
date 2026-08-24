@@ -314,6 +314,178 @@ footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);
 .dim{color:var(--ink-3);font-size:.9em}
 code{font-family:"IBM Plex Mono",monospace;background:var(--surface-2);
   padding:1px 5px;border-radius:2px;font-size:.85em}
+
+.tabs{display:flex;gap:2px;margin:26px 0 0;border-bottom:2px solid var(--line)}
+.tabs button{appearance:none;background:none;border:0;border-bottom:2px solid transparent;
+  margin-bottom:-2px;padding:9px 16px;cursor:pointer;color:var(--ink-3);
+  font-family:"Saira Condensed",sans-serif;font-size:1rem;letter-spacing:.06em;
+  text-transform:uppercase}
+.tabs button:hover{color:var(--ink-2)}
+.tabs button[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.panel[hidden]{display:none}
+
+.viewer{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:16px}
+@media (max-width:820px){.viewer{grid-template-columns:1fr}}
+#pitch{width:100%;height:auto;background:var(--surface);border:1px solid var(--line);
+  border-radius:3px;display:block}
+.ctrl{display:flex;align-items:center;gap:10px;margin-top:10px}
+.ctrl button{appearance:none;background:var(--accent);color:#10131A;border:0;
+  border-radius:3px;padding:7px 15px;cursor:pointer;font-weight:600;
+  font-family:"IBM Plex Sans",sans-serif}
+.ctrl input[type=range]{flex:1;accent-color:var(--accent)}
+.ctrl .clock{font-family:"IBM Plex Mono",monospace;color:var(--ink-2);font-size:.85rem;
+  min-width:72px;text-align:right}
+.moments{max-height:430px;overflow-y:auto;display:flex;flex-direction:column;gap:5px}
+.moments button{appearance:none;text-align:left;background:var(--surface);
+  border:1px solid var(--line);border-left:3px solid var(--ink-3);border-radius:3px;
+  padding:7px 10px;cursor:pointer;color:var(--ink-2);font-size:.8rem;
+  font-family:"IBM Plex Sans",sans-serif}
+.moments button:hover{color:var(--ink);border-color:var(--accent)}
+.moments button.conceded{border-left-color:var(--bad)}
+.moments button.scored{border-left-color:var(--good)}
+.moments button.kickoff{border-left-color:var(--ink-3)}
+.moments button.demoed,.moments button.demo{border-left-color:var(--accent)}
+.moments b{font-family:"IBM Plex Mono",monospace;color:var(--ink-3);
+  margin-right:7px;font-weight:400}
+"""
+
+
+VIEWER_JS = r"""
+<script>
+(function () {
+  var T = window.__TRACK__;
+  var tabs = document.querySelectorAll('.tabs button');
+  var panels = document.querySelectorAll('.panel');
+  function show(name) {
+    tabs.forEach(function (b) {
+      b.setAttribute('aria-selected', String(b.dataset.tab === name));
+    });
+    panels.forEach(function (p) { p.hidden = p.dataset.panel !== name; });
+  }
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () { show(b.dataset.tab); });
+  });
+  show('overview');
+  // A hidden panel has clientWidth 0, so the canvas sizes to nothing on load
+  // and paints an empty 0x0 bitmap. Re-size whenever the tab is opened.
+  var onShow = null;
+  var _show = show;
+  show = function (name) { _show(name); if (name === 'replay' && onShow) onShow(); };
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (b.dataset.tab === 'replay' && onShow) onShow();
+    });
+  });
+
+  if (!T || !T.frames || !T.frames.length) return;
+
+  // Field is 8192 x 10240 uu. Drawn so YOUR net is always at the bottom,
+  // whichever side you actually played -- otherwise half the replays read
+  // upside down and every "back post" note points the wrong way.
+  var W = 8192, H = 10240, PAD = 60;
+  var cv = document.getElementById('pitch');
+  var ctx = cv.getContext('2d');
+  var range = document.getElementById('scrub');
+  var play = document.getElementById('play');
+  var clock = document.getElementById('clock');
+  var i = 0, timer = null;
+  var flip = T.my_team === 1 ? -1 : 1;
+
+  function css(v) {
+    return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  }
+  function X(x) { return PAD + (x * flip + W / 2) / W * (cv.width - PAD * 2); }
+  function Y(y) { return cv.height - PAD - (y * flip + H / 2) / H * (cv.height - PAD * 2); }
+
+  function draw() {
+    var f = T.frames[i];
+    ctx.clearRect(0, 0, cv.width, cv.height);
+
+    ctx.strokeStyle = css('--line'); ctx.lineWidth = 2;
+    ctx.strokeRect(X(-W / 2), Y(H / 2), X(W / 2) - X(-W / 2), Y(-H / 2) - Y(H / 2));
+    ctx.beginPath(); ctx.moveTo(X(-W / 2), Y(0)); ctx.lineTo(X(W / 2), Y(0)); ctx.stroke();
+    ctx.beginPath(); ctx.arc(X(0), Y(0), Math.abs(X(1000) - X(0)), 0, 6.284); ctx.stroke();
+
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = css('--good');
+    ctx.beginPath(); ctx.moveTo(X(-893), Y(H / 2)); ctx.lineTo(X(893), Y(H / 2)); ctx.stroke();
+    ctx.strokeStyle = css('--bad');
+    ctx.beginPath(); ctx.moveTo(X(-893), Y(-H / 2)); ctx.lineTo(X(893), Y(-H / 2)); ctx.stroke();
+
+    ctx.fillStyle = css('--ink-3');
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.fillText('their net', X(-500), Y(H / 2) - 14);
+    ctx.fillText('your net', X(-480), Y(-H / 2) + 24);
+
+    for (var c = 0; c < T.names.length; c++) {
+      var x = f[4 + c * 2], y = f[5 + c * 2];
+      if (x === 0 && y === 0) continue;
+      var mine = T.teams[c] === T.my_team;
+      var me = c === T.me;
+      ctx.beginPath();
+      ctx.arc(X(x), Y(y), me ? 11 : 8, 0, 6.284);
+      ctx.fillStyle = me ? css('--accent') : (mine ? css('--blue') : css('--orange'));
+      ctx.fill();
+      if (me) { ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2; ctx.stroke(); }
+      ctx.fillStyle = css('--ink-2');
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillText(T.names[c].slice(0, 12), X(x) + 14, Y(y) + 4);
+    }
+
+    // Ball grows with height, so an aerial ball is visible in a plan view.
+    ctx.beginPath();
+    ctx.arc(X(f[1]), Y(f[2]), 6 + Math.min(f[3], 2000) / 260, 0, 6.284);
+    ctx.fillStyle = css('--ink');
+    ctx.fill();
+
+    clock.textContent = f[0].toFixed(1) + 's';
+  }
+
+  function seek(n) {
+    i = Math.max(0, Math.min(T.frames.length - 1, n));
+    range.value = i;
+    draw();
+  }
+  range.max = T.frames.length - 1;
+  range.addEventListener('input', function () { seek(+range.value); });
+  play.addEventListener('click', function () {
+    if (timer) { clearInterval(timer); timer = null; play.textContent = 'Play'; return; }
+    play.textContent = 'Pause';
+    timer = setInterval(function () {
+      if (i >= T.frames.length - 1) {
+        clearInterval(timer); timer = null; play.textContent = 'Play'; return;
+      }
+      seek(i + 1);
+    }, 1000 * (T.frames[T.frames.length - 1][0] - T.frames[0][0]) /
+       Math.max(T.frames.length - 1, 1));
+  });
+  // Seek by the timestamp each frame carries, NOT by t * hz. The downsample
+  // step is an integer, so the real rate is 9.48 Hz where hz says 10, and
+  // multiplying drifts ~5% -- an 18 second miss three minutes into a match.
+  function seekTime(t) {
+    var lo = 0, hi = T.frames.length - 1;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (T.frames[mid][0] < t) lo = mid + 1; else hi = mid;
+    }
+    seek(lo);
+  }
+  document.querySelectorAll('.moments button').forEach(function (b) {
+    b.addEventListener('click', function () { seekTime(+b.dataset.t); });
+  });
+
+  function size() {
+    var w = cv.parentElement.clientWidth;
+    cv.width = w;
+    cv.height = Math.round(w * 1.15);
+    draw();
+  }
+  window.addEventListener('resize', size);
+  onShow = size;
+  size();
+})();
+</script>
 """
 
 
@@ -633,6 +805,12 @@ def build(payload, refresh=0) -> str:
         a('<div class="sect"><h2>Where you actually sit</h2></div>')
         a('<div class="cards">%s</div>' % rank_block(rank))
 
+    a('<div class="tabs" role="tablist">'
+      '<button role="tab" data-tab="overview" aria-selected="true">Your stats</button>'
+      '<button role="tab" data-tab="lobby">Lobby &amp; opponents</button>'
+      '<button role="tab" data-tab="replay">Replay</button></div>')
+
+    a('<div class="panel" data-panel="overview">')
     a('<div class="sect"><h2>By playlist</h2></div>')
     a('<div class="cards">')
     grids = []
@@ -791,6 +969,34 @@ def build(payload, refresh=0) -> str:
 
     a("</div>")
 
+    a("</div>")   # end overview panel
+
+    a('<div class="panel" data-panel="lobby" hidden>')
+    lob = sec(latest, "lobby")
+    if lob.get("players"):
+        a('<div class="sect"><h2>Everyone in your last match</h2></div>')
+        a('<div class="card scroll"><table>')
+        a("<tr><td><b>player</b></td><td><b>score &middot; speed &middot; "
+          "first-ball &middot; boost &middot; air &middot; demos</b></td></tr>")
+        order = sorted(lob["players"].items(), key=lambda kv: -kv[1].get("score", 0))
+        for nm, pl in order:
+            side = ("you" if nm == lob.get("me")
+                    else "mate" if pl.get("mine") else "opponent")
+            col = ("var(--accent)" if side == "you"
+                   else "var(--blue)" if side == "mate" else "var(--orange)")
+            a('<tr><td><span style="color:%s">%s</span> %s</td>'
+              "<td>%d &middot; %.0f &middot; %.1f%% &middot; %.0f &middot; "
+              "%.1f%% &middot; %d</td></tr>"
+              % (col, esc(side), esc(nm), pl.get("score", 0), pl.get("speed", 0),
+                 pl.get("first_man", 0), pl.get("boost_held", 0),
+                 pl.get("airborne", 0), pl.get("demos", 0)))
+        a("</table></div>")
+        for ln in ((latest.get("sections", {}).get("lobby") or {}).get("lines") or []):
+            if "top of the lobby" in ln:
+                a('<p style="color:var(--ink-2);max-width:70ch">%s</p>' % esc(ln.strip()))
+    else:
+        a('<p style="color:var(--ink-3)">No lobby data in the latest match.</p>')
+
     if grids:
         a('<div class="sect"><h2>Where you live</h2></div>')
         a('<div class="cards">')
@@ -798,6 +1004,36 @@ def build(payload, refresh=0) -> str:
             a(heat_block(g["grid"], g["grid_max"],
                          "%dv%d &middot; %d matches" % (size, size, g["n"])))
         a("</div>")
+
+    a("</div>")   # end lobby panel
+
+    a('<div class="panel" data-panel="replay" hidden>')
+    track = payload.get("track")
+    if track and track.get("frames"):
+        a('<div class="sect"><h2>Replay &middot; %s</h2></div>'
+          % esc(latest.get("date") or ""))
+        a('<div class="viewer"><div>')
+        a('<canvas id="pitch"></canvas>')
+        a('<div class="ctrl"><button id="play" type="button">Play</button>'
+          '<input id="scrub" type="range" min="0" value="0" '
+          'aria-label="scrub the replay">'
+          '<span class="clock" id="clock">0.0s</span></div>')
+        a('<p style="color:var(--ink-3);font-size:.82rem;max-width:64ch">'
+          "Plan view at %d Hz. Your net is always at the bottom whichever side "
+          "you played. The ball grows with height, so an aerial reads as a "
+          "bigger circle. You are the highlighted dot.</p>" % track.get("hz", 10))
+        a("</div>")
+        a('<div><div class="eyebrow" style="margin-bottom:8px">Jump to</div>'
+          '<div class="moments">')
+        for mo in track.get("moments", []):
+            a('<button type="button" class="%s" data-t="%s"><b>%d:%02d</b>%s</button>'
+              % (esc(mo["kind"]), mo["t"], int(mo["t"] // 60), int(mo["t"] % 60),
+                 esc(mo["text"])))
+        a("</div></div></div>")
+        a("<script>window.__TRACK__=%s;</script>" % json.dumps(track))
+    else:
+        a('<p style="color:var(--ink-3)">No replay track for the latest match.</p>')
+    a("</div>")   # end replay panel
 
     if tips:
         a('<div class="sect"><h2>Everything worth working on</h2></div>')
@@ -813,6 +1049,8 @@ def build(payload, refresh=0) -> str:
       "Pointers come from the most recent match only. Latest: %s.</footer>"
       % (career["n"], esc(latest.get("date") or "?")))
     a("</div>")
+    # Last, so the elements it wires up already exist when it runs.
+    a(VIEWER_JS)
     return "\n".join(out)
 
 

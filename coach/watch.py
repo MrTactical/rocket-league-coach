@@ -46,6 +46,7 @@ from coach.analyse import analyse_match, discover  # noqa: E402
 from coach.page import build  # noqa: E402
 from coach.mmrlog import LIVE_LOG, PLAYLISTS, read_all_logs  # noqa: E402
 from coach.timeline import DEMOS, load, save_replay_hint  # noqa: E402
+from coach.viewer import build_track  # noqa: E402
 
 # Beside the exe when frozen, beside the source otherwise. The bundle dir is
 # a temp folder that vanishes on exit, so nothing writable can live there.
@@ -237,6 +238,7 @@ def rebuild(cache, out_path):
         "matches": sorted(real, key=lambda m: m.get("date") or ""),
     }
     payload["player"] = current_name(payload["matches"], payload["player"])
+    payload["track"] = cache.get("track")
     rank_path = RANK
     if rank_path.is_file():
         try:
@@ -431,6 +433,10 @@ def sweep(cache, modules, out_path, verbose):
             continue
 
         cache["entries"][key_for(f)] = entry
+        try:
+            cache["track"] = build_track(m, who)
+        except Exception:
+            cache["track"] = None
         done += 1
         print("  + %s   %s" % (entry.get("date") or name, headline(entry)))
         post_match(entry, cache)
