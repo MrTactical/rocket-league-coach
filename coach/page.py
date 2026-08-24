@@ -780,6 +780,10 @@ VIEWER_JS = r"""
     }
 
     if (goalSide) return;
+    // No 'be here' marker unless the measurement actually separates holding
+    // from conceding. In 2v2 it does not (0.35 vs 0.36), so drawing one there
+    // would be decoration dressed as advice.
+    if (SH.usable === false) return;
 
     // Where you should be instead.
     //

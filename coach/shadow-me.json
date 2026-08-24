@@ -1,9 +1,11 @@
 {
-  "depth_held": 0.22431049012162008,
-  "depth_conceded": 0.3425987895362778,
-  "lateral_held": 0.3937775962037051,
-  "lateral_conceded": 0.648459336159512,
-  "n_held": 9084,
-  "n_conceded": 919,
-  "matches": 21
+  "depth_held": 0.2282933734406796,
+  "depth_conceded": 0.3277041260390781,
+  "lateral_held": 0.37742913364888586,
+  "lateral_conceded": 0.6409860685866959,
+  "n_held": 10670,
+  "n_conceded": 1020,
+  "separation": 0.09941075259839852,
+  "matches": 24,
+  "team_size": 3
 }
