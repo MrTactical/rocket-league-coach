@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -372,3 +373,66 @@ class Match:
 
 def load(path):
     return Match(parse(path), path=path)
+
+
+# --- the player's own save-replay keybind ---------------------------------
+#
+# Telling everyone to "hold Backspace" is telling them YOUR keybind. Rocket
+# League stores the real one per input device in TAInput.ini, so read it
+# instead of guessing -- a controller player has never pressed Backspace in
+# their life.
+
+CONFIG_DIR = Path(os.path.expanduser(
+    "~/Documents/My Games/Rocket League/TAGame/Config"))
+
+_BIND = re.compile(
+    r'(?P<dev>PC|Gamepad|SteamInput)Bindings=\(\s*Action="AutoSaveReplay",\s*'
+    r'Key="(?P<key>[^"]+)"(?:,\s*PressType=(?P<press>\w+))?')
+
+# The engine's key names are not what is printed on the hardware.
+_PRETTY = {
+    "XboxTypeS_Back": "Back / View",
+    "XboxTypeS_Start": "Start / Menu",
+    "XboxTypeS_LeftThumbStick": "left stick click",
+    "XboxTypeS_RightThumbStick": "right stick click",
+    "XboxTypeS_DPad_Up": "D-pad up",
+    "XboxTypeS_DPad_Down": "D-pad down",
+    "XboxTypeS_LeftShoulder": "LB",
+    "XboxTypeS_RightShoulder": "RB",
+}
+
+
+def save_replay_binding():
+    """
+    How THIS player saves a replay: {"keyboard": "...", "gamepad": "..."}.
+
+    Empty if the config cannot be read -- callers should fall back to naming
+    both common defaults rather than asserting one.
+    """
+    path = CONFIG_DIR / "TAInput.ini"
+    if not path.is_file():
+        return {}
+    try:
+        txt = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return {}
+
+    out = {}
+    for m in _BIND.finditer(txt):
+        dev = "keyboard" if m.group("dev") == "PC" else "gamepad"
+        key = _PRETTY.get(m.group("key"), m.group("key"))
+        if (m.group("press") or "").endswith("Hold"):
+            key = "hold " + key
+        out[dev] = key            # later entries win; profiles repeat
+    return out
+
+
+def save_replay_hint():
+    """One printable line telling the player how to save a replay."""
+    b = save_replay_binding()
+    if not b:
+        return ("save a replay at the end of a match "
+                "(hold Backspace, or hold Back/View on a controller)")
+    parts = [v for k, v in (("keyboard", b.get("keyboard")),
+                            ("gamepad", b.get("gamepad"))) if v]
+    return "save a replay at the end of a match: " + " or ".join(parts)

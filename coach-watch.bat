@@ -8,7 +8,6 @@ rem Close this window to stop it. Ctrl-C also works.
 title Rocket League Coach
 cd /d "%~dp0"
 echo Rocket League coach -- waiting for the game.
-echo Save a replay in game by HOLDING BACKSPACE at the end of a match.
 echo.
 "%~dp0venv\Scripts\python.exe" -u coach\watch.py --auto
 echo.
