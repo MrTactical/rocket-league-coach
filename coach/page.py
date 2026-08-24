@@ -424,24 +424,89 @@ VIEWER_JS = r"""
     return getComputedStyle(document.documentElement).getPropertyValue(v).trim();
   }
 
-  // --- a small hand-rolled perspective camera ---------------------------
-  // No 3D library: the scene is a flat pitch plus a dozen boxes, and a
-  // library would be 600 KB inlined to do what forty lines of projection do.
+  // --- dynamic camera ----------------------------------------------------
+  // A fixed camera cannot do both jobs: framed for the whole pitch the cars
+  // are specks, framed for the action half the pitch falls off screen. So the
+  // camera follows, and the distance is SOLVED each frame from the spread of
+  // whatever matters right now -- the ball, your car, and anyone near enough
+  // to the ball to be part of the play.
   //
-  // Solved numerically rather than eyeballed -- a parameter search over
-  // distance, height, pitch and focal length maximising how much of the frame
-  // the pitch fills while keeping all four corners, both goal frames and the
-  // ceiling on screen.
-  var CAM = {y: -9000, z: 8000, pitch: 0.80, f: 900};
-  function project(x, y, z) {
-    var rx = x * flip, ry = y * flip;
-    var dy = ry - CAM.y, dz = z - CAM.z;
+  // Everything is smoothed toward its target. Snapping the camera to a
+  // bouncing ball is unwatchable.
+  // The camera must LOOK AT the focus, so its height is a function of its
+  // distance: camZ = d * tan(pitch). Held at a fixed height it aims at the
+  // horizon instead, which put the ball off the top of the frame ~100% of
+  // the time while every other check (depth order, scale) still passed.
+  var CAM = {pitch: 0.80, f: 900};
+  var cam = {x: 0, y: 0, d: 11000};        // current, smoothed
+  var want = {x: 0, y: 0, d: 11000};       // target for this frame
+  var MIN_D = 5200, MAX_D = 17000, FOLLOW = 0.08;
+
+  function planCamera(f) {
+    var pts = [[f.ball[0], f.ball[1]]];
+    var me = f.cars[T.me];
+    if (me) pts.push([me[0], me[1]]);
+    for (var c = 0; c < N; c++) {
+      var k = f.cars[c];
+      if (!k || c === T.me) continue;
+      var near = Math.hypot(k[0] - f.ball[0], k[1] - f.ball[1]);
+      if (near < 3400) pts.push([k[0], k[1]]);
+    }
+    var xs = pts.map(function (p) { return p[0]; });
+    var ys = pts.map(function (p) { return p[1]; });
+    var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+    var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+
+    want.x = (minX + maxX) / 2;
+    want.y = (minY + maxY) / 2;
+
+    // Perspective makes "what distance fits this box" awkward in closed form
+    // -- ground compresses toward the horizon, so the visible span is not
+    // linear in distance. Binary search instead: ~18 cheap iterations a frame,
+    // and correct by construction rather than by an approximation I would then
+    // have to trust.
+    var pad = 1300;
+    var box = [[minX - pad, minY - pad], [maxX + pad, minY - pad],
+               [minX - pad, maxY + pad], [maxX + pad, maxY + pad]];
+    var lo = MIN_D, hi = MAX_D;
+    for (var it = 0; it < 18; it++) {
+      var mid = (lo + hi) / 2;
+      if (fitsAt(box, want.x, want.y, mid)) hi = mid; else lo = mid;
+    }
+    want.d = hi;
+  }
+
+  function projectFrom(x, y, z, ox, oy, d) {
+    var rx = (x - ox) * flip, ry = (y - oy) * flip;
+    var dy = ry + d, dz = z - d * Math.tan(CAM.pitch);
     var c = Math.cos(CAM.pitch), s = Math.sin(CAM.pitch);
     var fwd = dy * c - dz * s;
     var up = dy * s + dz * c;
-    if (fwd < 200) return null;
+    if (fwd < 150) return null;
     var sc = CAM.f / fwd;
-    return {x: cv.width / 2 + rx * sc, y: cv.height * 0.50 - up * sc,
+    return {x: cv.width / 2 + rx * sc, y: cv.height * 0.52 - up * sc,
+            s: sc, d: fwd};
+  }
+
+  function fitsAt(box, ox, oy, d) {
+    for (var k = 0; k < box.length; k++) {
+      var q = projectFrom(box[k][0], box[k][1], 0, ox, oy, d);
+      if (!q) return false;
+      if (q.x < 4 || q.x > cv.width - 4 || q.y < 4 || q.y > cv.height - 4)
+        return false;
+    }
+    return true;
+  }
+
+  function project(x, y, z) {
+    var rx = (x - cam.x) * flip, ry = (y - cam.y) * flip;
+    var dy = ry + cam.d, dz = z - cam.d * Math.tan(CAM.pitch);
+    var c = Math.cos(CAM.pitch), s = Math.sin(CAM.pitch);
+    var fwd = dy * c - dz * s;
+    var up = dy * s + dz * c;
+    if (fwd < 150) return null;
+    var sc = CAM.f / fwd;
+    return {x: cv.width / 2 + rx * sc, y: cv.height * 0.52 - up * sc,
             s: sc, d: fwd};
   }
 
@@ -557,10 +622,80 @@ VIEWER_JS = r"""
     ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
   }
 
+  // --- coaching overlay --------------------------------------------------
+  // Only two marks, both tied to findings this analyser actually made rather
+  // than to generic advice.
+  //
+  //   SHADOW    where you should be when the ball is not yours: on the line
+  //             from your net to the ball, goal-side, about a third of the
+  //             way out. Drawn only when you are NOT goal-side, which is the
+  //             exact state the recovery metric says you fail to correct.
+  //   HOME      an arrow from your car to your net while you are beaten,
+  //             because the measured fault is not being out of position, it
+  //             is not turning around.
+  function drawOverlay(f) {
+    var me = f.cars[T.me];
+    if (!me) return;
+    var sgn = T.my_team === 1 ? -1 : 1;      // +y is their goal for team 0
+    var ownY = -5120 * sgn;
+    var goalSide = (me[1] * sgn) < (f.ball[1] * sgn);
+
+    // Goal-side status ring under your car.
+    var p = project(me[0], me[1], 0);
+    if (p) {
+      ctx.strokeStyle = goalSide ? css('--good') : css('--bad');
+      ctx.globalAlpha = 0.75; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y, 150 * p.s, 62 * p.s, 0, 0, 6.2832);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    if (goalSide) return;
+
+    // Where you should be instead.
+    var sx = f.ball[0] * 0.35;
+    var sy = ownY + (f.ball[1] - ownY) * 0.34;
+    var g = project(sx, sy, 0);
+    if (g) {
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = css('--accent'); ctx.globalAlpha = 0.9; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(g.x, g.y, 150 * g.s, 62 * g.s, 0, 0, 6.2832);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = css('--accent');
+      ctx.font = '11px "IBM Plex Sans", sans-serif';
+      ctx.fillText('be here', g.x - 22, g.y - 70 * g.s - 4);
+      ctx.globalAlpha = 1;
+    }
+
+    // And the direction to go, which is the thing you measurably do not do.
+    if (p && g) {
+      ctx.strokeStyle = css('--accent'); ctx.globalAlpha = 0.55;
+      ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(g.x, g.y); ctx.stroke();
+      ctx.setLineDash([]);
+      var a = Math.atan2(g.y - p.y, g.x - p.x);
+      ctx.fillStyle = css('--accent');
+      ctx.beginPath();
+      ctx.moveTo(g.x, g.y);
+      ctx.lineTo(g.x - 11 * Math.cos(a - 0.4), g.y - 11 * Math.sin(a - 0.4));
+      ctx.lineTo(g.x - 11 * Math.cos(a + 0.4), g.y - 11 * Math.sin(a + 0.4));
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
   function draw(t) {
     var f = sample(t);
+    planCamera(f);
+    cam.x += (want.x - cam.x) * FOLLOW;
+    cam.y += (want.y - cam.y) * FOLLOW;
+    cam.d += (want.d - cam.d) * FOLLOW;
     ctx.clearRect(0, 0, cv.width, cv.height);
     drawPitch();
+    drawOverlay(f);
 
     // Painter's algorithm: furthest first, or near cars vanish behind far ones.
     var items = [];
@@ -600,23 +735,36 @@ VIEWER_JS = r"""
     range.value = String(Math.round((t - T0) * 100));
   }
 
-  function seekTime(t) {
+  function seekTime(t, snap) {
     cursor = Math.max(T0, Math.min(T1, t));
+    if (snap !== false) {
+      // Jumping to a moment should cut, not glide the camera across the pitch.
+      planCamera(sample(cursor));
+      cam.x = want.x; cam.y = want.y; cam.d = want.d;
+    }
     draw(cursor);
   }
 
-  function momentAt(t) {
+  // The cursor is a running sum of dt * rate, so it holds 22.299999 where it
+  // reads 22.3. An exact `t >= m.t` misses the window by a microsecond, and a
+  // separate "next moment is more than 0.05 ahead" test misses it too -- a
+  // dead zone in which an imminent moment is invisible to both, so the
+  // skip-ahead leaps clean over it. Four of nine moments were being skipped,
+  // including the conceded goal.
+  //
+  // So: one function returns the next moment whose window has NOT yet ended,
+  // and the skip is computed from that same moment. It is then structurally
+  // impossible to jump past one.
+  var SLOW = T.slow || 6, EPS = 0.15;
+  function pendingMoment(t) {
     for (var k = 0; k < T.moments.length; k++) {
-      var m = T.moments[k];
-      if (t >= m.t && t <= m.t + (T.slow || 6)) return m;
+      if (T.moments[k].t + SLOW > t) return T.moments[k];
     }
     return null;
   }
-  function nextMoment(t) {
-    for (var k = 0; k < T.moments.length; k++) {
-      if (T.moments[k].t > t + 0.05) return T.moments[k];
-    }
-    return null;
+  function momentAt(t) {
+    var m = pendingMoment(t);
+    return (m && t >= m.t - EPS) ? m : null;
   }
   function setCaption(m) {
     if (!m) { caption.hidden = true; return; }
@@ -637,7 +785,7 @@ VIEWER_JS = r"""
       if (m) { rate = 0.25; setCaption(m); }
       else {
         rate = 4; setCaption(null);
-        var nm = nextMoment(cursor);
+        var nm = pendingMoment(cursor);
         if (nm && nm.t - cursor > 3) cursor = nm.t - 1.5;
       }
     }
