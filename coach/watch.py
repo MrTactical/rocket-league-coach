@@ -45,7 +45,7 @@ for _s in (sys.stdout, sys.stderr):
 from coach.analyse import analyse_match, discover  # noqa: E402
 from coach.page import build  # noqa: E402
 from coach.mmrlog import LIVE_LOG, PLAYLISTS, read_all_logs  # noqa: E402
-from coach.timeline import DEMOS, load  # noqa: E402
+from coach.timeline import DEMOS, load, save_replay_hint  # noqa: E402
 
 # Beside the exe when frozen, beside the source otherwise. The bundle dir is
 # a temp folder that vanishes on exit, so nothing writable can live there.
@@ -488,7 +488,7 @@ def main() -> int:
     print("  you are %r" % cache["player"])
     print("  %d replays already seen, %d metric families loaded"
           % (len(cache["entries"]), len(modules)))
-    print("  save a replay in game by HOLDING BACKSPACE at the end of a match")
+    print("  " + save_replay_hint())
     print()
 
     if args.auto:

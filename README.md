@@ -32,8 +32,10 @@ Download `RocketLeagueCoach.exe` from Releases, put it in a folder of its own,
 and double-click. It waits for Rocket League, watches while you play, and
 writes `coach-report.html` next to itself.
 
-**Save your replays** — hold `Backspace` at the end of a match. No replay, no
-analysis.
+**Save your replays** at the end of each match. The tool reads your actual
+keybind out of `TAInput.ini` and tells you what it is on startup, because the
+default differs by device — `Backspace` on keyboard, `Back`/`View` on a
+controller — and you may have rebound it anyway.
 
 From source instead:
 
