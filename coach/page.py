@@ -368,8 +368,9 @@ VIEWER_JS = r"""
   var T = window.__TRACK__;
   var tabs = [].slice.call(document.querySelectorAll('.tabs button'));
   var panels = [].slice.call(document.querySelectorAll('.panel'));
-  var onShow = null;
+  var onShow = null, current = 'overview';
   function show(name) {
+    current = name;
     tabs.forEach(function (b) {
       b.setAttribute('aria-selected', String(b.dataset.tab === name));
     });
@@ -383,6 +384,24 @@ VIEWER_JS = r"""
   });
   show('overview');
 
+  // --- reload without stealing the page ---------------------------------
+  // This replaces <meta http-equiv="refresh">, which reloaded every 30s and
+  // threw away the current tab and any playback in progress -- the page
+  // appeared to "jump back to Your stats" on its own, mid-replay. A reload is
+  // only useful when you are not using the page, so wait until you are idle.
+  var RELOAD_AFTER = window.__RELOAD_SECS__ || 0;
+  if (RELOAD_AFTER) {
+    var idleSince = Date.now();
+    ['click', 'input', 'keydown', 'wheel', 'touchstart'].forEach(function (ev) {
+      document.addEventListener(ev, function () { idleSince = Date.now(); },
+                                {passive: true});
+    });
+    setInterval(function () {
+      var busy = playing || current === 'replay';
+      if (!busy && Date.now() - idleSince > RELOAD_AFTER * 1000) location.reload();
+    }, 5000);
+  }
+
   if (!T || !T.frames || !T.frames.length) return;
 
   var W = 8192, H = 10240, STRIDE = T.stride || 4;
@@ -394,7 +413,9 @@ VIEWER_JS = r"""
   var guide = document.getElementById('guide');
   var clock = document.getElementById('clock');
   var caption = document.getElementById('caption');
-  var i = 0, timer = null, guided = false, rate = 1;
+  var playing = false, guided = false, rate = 1, raf = null, last = 0;
+  var T0 = T.frames[0][0], T1 = T.frames[T.frames.length - 1][0];
+  var cursor = T0;                       // playback head, in seconds (float)
   // Always defend the near goal, whichever side was actually played --
   // otherwise half your replays render backwards.
   var flip = T.my_team === 1 ? -1 : 1;
@@ -406,19 +427,19 @@ VIEWER_JS = r"""
   // --- a small hand-rolled perspective camera ---------------------------
   // No 3D library: the scene is a flat pitch plus a dozen boxes, and a
   // library would be 600 KB inlined to do what forty lines of projection do.
-  // Solved numerically rather than eyeballed: a parameter search over camera
-  // distance, height, pitch and focal length, maximising how much of the frame
+  //
+  // Solved numerically rather than eyeballed -- a parameter search over
+  // distance, height, pitch and focal length maximising how much of the frame
   // the pitch fills while keeping all four corners, both goal frames and the
-  // ceiling on screen. The first hand-picked values put the near goal line and
-  // both near corners below the bottom edge.
+  // ceiling on screen.
   var CAM = {y: -9000, z: 8000, pitch: 0.80, f: 900};
   function project(x, y, z) {
     var rx = x * flip, ry = y * flip;
     var dy = ry - CAM.y, dz = z - CAM.z;
     var c = Math.cos(CAM.pitch), s = Math.sin(CAM.pitch);
-    var fwd = dy * c - dz * s;          // depth into the screen
-    var up = dy * s + dz * c;           // height on screen
-    if (fwd < 200) return null;         // behind or too near the camera
+    var fwd = dy * c - dz * s;
+    var up = dy * s + dz * c;
+    if (fwd < 200) return null;
     var sc = CAM.f / fwd;
     return {x: cv.width / 2 + rx * sc, y: cv.height * 0.50 - up * sc,
             s: sc, d: fwd};
@@ -439,7 +460,6 @@ VIEWER_JS = r"""
     line([-hw, -hh], [-hw, hh], lin, 2);
     line([hw, -hh], [hw, hh], lin, 2);
     line([-hw, 0], [hw, 0], lin, 2);
-    // centre circle
     var prev = null;
     for (var a = 0; a <= 32; a++) {
       var th = a / 32 * 6.2832;
@@ -447,109 +467,21 @@ VIEWER_JS = r"""
       if (prev) line(prev, pt, lin, 1);
       prev = pt;
     }
-    // goals, drawn as real 3D frames so the perspective reads
-    [[-hh, css('--good'), 'your net'], [hh, css('--bad'), 'their net']]
-      .forEach(function (g) {
-        var y = g[0], col = g[1];
-        line([-893, y, 0], [-893, y, 642], col, 3);
-        line([893, y, 0], [893, y, 642], col, 3);
-        line([-893, y, 642], [893, y, 642], col, 3);
-        line([-893, y, 0], [893, y, 0], col, 3);
-      });
-  }
-
-  function drawCar(x, y, z, head, col, me, name) {
-    var p = project(x, y, z + 17);
-    if (!p) return;
-    var len = 118 * p.s, wid = 84 * p.s, hgt = 36 * p.s;
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    // Yaw only: the camera looks down the pitch, so heading is the rotation
-    // that reads. Roll and pitch of the car are invisible at this scale.
-    ctx.rotate(-(head * Math.PI / 180) * flip * 0.55);
-    ctx.fillStyle = col;
-    ctx.globalAlpha = 0.95;
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(-len / 2, -wid / 2, len, wid, 3 * p.s);
-    else ctx.rect(-len / 2, -wid / 2, len, wid);
-    ctx.fill();
-    ctx.globalAlpha = 0.55;
-    ctx.fillRect(-len / 6, -wid / 2, len / 2.6, wid);
-    ctx.restore();
-    ctx.globalAlpha = 1;
-    if (me) {
-      ctx.strokeStyle = css('--ink');
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.75, 0, 6.2832);
-      ctx.stroke();
-    }
-    if (z > 120) {                       // shadow, so height is readable
-      var g = project(x, y, 0);
-      if (g) {
-        ctx.globalAlpha = 0.25;
-        ctx.fillStyle = css('--ink-3');
-        ctx.beginPath(); ctx.ellipse(g.x, g.y, len / 2, wid / 3, 0, 0, 6.2832);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-      }
-    }
-    ctx.fillStyle = me ? css('--accent') : css('--ink-3');
-    ctx.font = Math.max(9, 11 * p.s * 40) + 'px ui-monospace, monospace';
-    ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
-  }
-
-  function draw() {
-    var f = T.frames[i];
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    drawPitch();
-
-    // Painter's algorithm: furthest first, or near cars vanish behind far ones.
-    var items = [];
-    for (var c = 0; c < N; c++) {
-      var o = 4 + c * STRIDE;
-      var x = f[o], y = f[o + 1];
-      if (x === 0 && y === 0) continue;
-      items.push({d: (y * flip), kind: 'car', c: c, x: x, y: y,
-                  z: f[o + 2], h: f[o + 3]});
-    }
-    items.push({d: f[2] * flip, kind: 'ball', x: f[1], y: f[2], z: f[3]});
-    items.sort(function (a, b) { return b.d - a.d; });
-
-    items.forEach(function (it) {
-      if (it.kind === 'ball') {
-        var p = project(it.x, it.y, it.z);
-        if (!p) return;
-        if (it.z > 120) {
-          var g = project(it.x, it.y, 0);
-          if (g) {
-            ctx.globalAlpha = 0.25; ctx.fillStyle = css('--ink-3');
-            ctx.beginPath(); ctx.ellipse(g.x, g.y, 92 * p.s, 40 * p.s, 0, 0, 6.2832);
-            ctx.fill(); ctx.globalAlpha = 1;
-          }
-        }
-        ctx.fillStyle = css('--ink');
-        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, 92 * p.s), 0, 6.2832);
-        ctx.fill();
-      } else {
-        var mine = T.teams[it.c] === T.my_team;
-        drawCar(it.x, it.y, it.z, it.h,
-                it.c === T.me ? css('--accent')
-                              : (mine ? css('--blue') : css('--orange')),
-                it.c === T.me, T.names[it.c]);
-      }
+    [[-hh, css('--good')], [hh, css('--bad')]].forEach(function (g) {
+      var y = g[0], col = g[1];
+      line([-893, y, 0], [-893, y, 642], col, 3);
+      line([893, y, 0], [893, y, 642], col, 3);
+      line([-893, y, 642], [893, y, 642], col, 3);
+      line([-893, y, 0], [893, y, 0], col, 3);
     });
-
-    clock.textContent = f[0].toFixed(1) + 's' + (rate !== 1 ? '  ' + rate + 'x' : '');
   }
 
-  function seek(n) {
-    i = Math.max(0, Math.min(T.frames.length - 1, n));
-    range.value = i;
-    draw();
-  }
-  // Seek by the timestamp each frame carries, NOT t * hz: the downsample step
-  // is an integer, so the real rate drifts from the nominal one and three
-  // minutes in that is an 18 second miss.
+  // --- interpolation ----------------------------------------------------
+  // The track is ~9.5 Hz. Stepping frame to frame looks fine at 1x and awful
+  // at 0.25x, which is exactly when you are studying a mistake -- 2.4 frames
+  // a second. So playback carries a float time cursor and every draw lerps
+  // between the two bracketing frames, giving smooth motion at any rate from
+  // the same data.
   function frameAt(t) {
     var lo = 0, hi = T.frames.length - 1;
     while (lo < hi) {
@@ -559,15 +491,120 @@ VIEWER_JS = r"""
     return lo;
   }
 
-  var STEP_MS = 1000 * (T.frames[T.frames.length - 1][0] - T.frames[0][0]) /
-                Math.max(T.frames.length - 1, 1);
-
-  function nextMoment(t) {
-    for (var k = 0; k < T.moments.length; k++) {
-      if (T.moments[k].t > t + 0.05) return T.moments[k];
-    }
-    return null;
+  function lerpAngle(a, b, u) {
+    var d = ((b - a + 540) % 360) - 180;   // shortest way round
+    return a + d * u;
   }
+
+  function sample(t) {
+    var hi = frameAt(t), lo = Math.max(0, hi - 1);
+    var A = T.frames[lo], B = T.frames[hi];
+    var span = B[0] - A[0];
+    var u = span > 1e-6 ? Math.min(1, Math.max(0, (t - A[0]) / span)) : 0;
+    var out = {ball: [A[1] + (B[1] - A[1]) * u,
+                      A[2] + (B[2] - A[2]) * u,
+                      A[3] + (B[3] - A[3]) * u], cars: []};
+    for (var c = 0; c < N; c++) {
+      var o = 4 + c * STRIDE;
+      // A car absent from a frame is stored as zeros; interpolating toward
+      // that would slide it to the centre spot instead of leaving it be.
+      var aOff = (A[o] === 0 && A[o + 1] === 0);
+      var bOff = (B[o] === 0 && B[o + 1] === 0);
+      if (aOff && bOff) { out.cars.push(null); continue; }
+      var src = aOff ? B : A, dst = bOff ? A : B, uu = (aOff || bOff) ? 0 : u;
+      out.cars.push([
+        src[o] + (dst[o] - src[o]) * uu,
+        src[o + 1] + (dst[o + 1] - src[o + 1]) * uu,
+        src[o + 2] + (dst[o + 2] - src[o + 2]) * uu,
+        lerpAngle(src[o + 3], dst[o + 3], uu)
+      ]);
+    }
+    return out;
+  }
+
+  function drawCar(x, y, z, head, col, me, name) {
+    var p = project(x, y, z + 17);
+    if (!p) return;
+    var len = 118 * p.s, wid = 84 * p.s;
+    if (z > 120) {
+      var g = project(x, y, 0);
+      if (g) {
+        ctx.globalAlpha = 0.22; ctx.fillStyle = css('--ink-3');
+        ctx.beginPath(); ctx.ellipse(g.x, g.y, len / 2, wid / 3, 0, 0, 6.2832);
+        ctx.fill(); ctx.globalAlpha = 1;
+      }
+    }
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(-(head * Math.PI / 180) * flip * 0.55);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-len / 2, -wid / 2, len, wid, 3 * p.s);
+    else ctx.rect(-len / 2, -wid / 2, len, wid);
+    ctx.fill();
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(-len / 6, -wid / 2, len / 2.6, wid);
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    if (me) {
+      ctx.strokeStyle = css('--ink'); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(len, wid) * 0.8, 0, 6.2832);
+      ctx.stroke();
+    }
+    ctx.fillStyle = me ? css('--accent') : css('--ink-3');
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
+  }
+
+  function draw(t) {
+    var f = sample(t);
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    drawPitch();
+
+    // Painter's algorithm: furthest first, or near cars vanish behind far ones.
+    var items = [];
+    for (var c = 0; c < N; c++) {
+      var k = f.cars[c];
+      if (k) items.push({d: k[1] * flip, kind: 'car', c: c, p: k});
+    }
+    items.push({d: f.ball[1] * flip, kind: 'ball', p: f.ball});
+    items.sort(function (a, b) { return b.d - a.d; });
+
+    items.forEach(function (it) {
+      if (it.kind === 'ball') {
+        var p = project(it.p[0], it.p[1], it.p[2]);
+        if (!p) return;
+        if (it.p[2] > 120) {
+          var g = project(it.p[0], it.p[1], 0);
+          if (g) {
+            ctx.globalAlpha = 0.22; ctx.fillStyle = css('--ink-3');
+            ctx.beginPath();
+            ctx.ellipse(g.x, g.y, 92 * p.s, 40 * p.s, 0, 0, 6.2832);
+            ctx.fill(); ctx.globalAlpha = 1;
+          }
+        }
+        ctx.fillStyle = css('--ink');
+        ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, 92 * p.s), 0, 6.2832);
+        ctx.fill();
+      } else {
+        var mine = T.teams[it.c] === T.my_team;
+        drawCar(it.p[0], it.p[1], it.p[2], it.p[3],
+                it.c === T.me ? css('--accent')
+                              : (mine ? css('--blue') : css('--orange')),
+                it.c === T.me, T.names[it.c]);
+      }
+    });
+
+    clock.textContent = t.toFixed(1) + 's' + (rate !== 1 ? '   ' + rate + 'x' : '');
+    range.value = String(Math.round((t - T0) * 100));
+  }
+
+  function seekTime(t) {
+    cursor = Math.max(T0, Math.min(T1, t));
+    draw(cursor);
+  }
+
   function momentAt(t) {
     for (var k = 0; k < T.moments.length; k++) {
       var m = T.moments[k];
@@ -575,67 +612,85 @@ VIEWER_JS = r"""
     }
     return null;
   }
-
-  function tick() {
-    if (i >= T.frames.length - 1) { stop(); return; }
-    seek(i + 1);
-    var t = T.frames[i][0];
-    if (guided) {
-      var m = momentAt(t);
-      if (m) {
-        rate = 0.25;
-        caption.hidden = false;
-        caption.innerHTML = '<b>' + m.title + '</b>' + m.text;
-        caption.className = 'caption ' + m.kind;
-      } else {
-        rate = 4;
-        caption.hidden = true;
-        // Nothing is happening -- skip ahead to the next thing that is.
-        var nm = nextMoment(t);
-        if (nm && nm.t - t > 3) seek(frameAt(nm.t - 1.5));
-      }
-      restart();
+  function nextMoment(t) {
+    for (var k = 0; k < T.moments.length; k++) {
+      if (T.moments[k].t > t + 0.05) return T.moments[k];
     }
+    return null;
   }
-  function restart() {
-    if (!timer) return;
-    clearInterval(timer);
-    timer = setInterval(tick, STEP_MS / rate);
+  function setCaption(m) {
+    if (!m) { caption.hidden = true; return; }
+    caption.hidden = false;
+    caption.className = 'caption ' + m.kind;
+    caption.innerHTML = '<b>' + m.title + '</b>' + m.text;
+  }
+
+  // Time-based, not frame-based: rAF gives ~60 fps regardless of the data
+  // rate, and the cursor advances by real elapsed time times the play rate.
+  function loop(now) {
+    if (!playing) return;
+    var dt = Math.min((now - last) / 1000, 0.25);   // ignore tab-away jumps
+    last = now;
+
+    if (guided) {
+      var m = momentAt(cursor);
+      if (m) { rate = 0.25; setCaption(m); }
+      else {
+        rate = 4; setCaption(null);
+        var nm = nextMoment(cursor);
+        if (nm && nm.t - cursor > 3) cursor = nm.t - 1.5;
+      }
+    }
+
+    cursor += dt * rate;
+    if (cursor >= T1) { cursor = T1; draw(cursor); stop(); return; }
+    draw(cursor);
+    raf = requestAnimationFrame(loop);
+  }
+
+  function start() {
+    if (playing) return;
+    playing = true; last = performance.now();
+    raf = requestAnimationFrame(loop);
   }
   function stop() {
-    clearInterval(timer); timer = null; guided = false; rate = 1;
-    play.textContent = 'Play'; guide.textContent = 'Guided run-through';
-    caption.hidden = true;
-  }
-  function start() {
-    if (timer) clearInterval(timer);
-    timer = setInterval(tick, STEP_MS / rate);
+    playing = false; guided = false; rate = 1;
+    if (raf) cancelAnimationFrame(raf);
+    raf = null;
+    play.textContent = 'Play';
+    guide.textContent = 'Guided run-through';
+    setCaption(null);
   }
 
   play.addEventListener('click', function () {
-    if (timer && !guided) { stop(); return; }
-    guided = false; rate = 1; caption.hidden = true;
-    play.textContent = 'Pause'; guide.textContent = 'Guided run-through';
+    if (playing && !guided) { stop(); return; }
+    stop();
+    play.textContent = 'Pause';
     start();
   });
   guide.addEventListener('click', function () {
-    if (timer && guided) { stop(); return; }
+    if (playing && guided) { stop(); return; }
+    stop();
     guided = true; rate = 4;
-    play.textContent = 'Play'; guide.textContent = 'Stop';
-    if (T.moments.length) seek(frameAt(Math.max(0, T.moments[0].t - 1.5)));
+    guide.textContent = 'Stop';
+    if (T.moments.length) cursor = Math.max(T0, T.moments[0].t - 1.5);
     start();
   });
-  range.max = T.frames.length - 1;
+
+  // Centiseconds, so the slider is smooth rather than snapping to frames.
+  range.min = 0;
+  range.max = Math.round((T1 - T0) * 100);
   range.addEventListener('input', function () {
-    stop(); seek(+range.value);
+    stop();
+    seekTime(T0 + (+range.value) / 100);
   });
+
   [].slice.call(document.querySelectorAll('.moments button')).forEach(function (b) {
     b.addEventListener('click', function () {
       stop();
-      seek(frameAt(+b.dataset.t));
-      caption.hidden = false;
-      caption.className = 'caption ' + b.dataset.kind;
-      caption.innerHTML = '<b>' + b.dataset.title + '</b>' + b.dataset.text;
+      seekTime(+b.dataset.t);
+      setCaption({kind: b.dataset.kind, title: b.dataset.title,
+                  text: b.dataset.text});
     });
   });
 
@@ -644,7 +699,7 @@ VIEWER_JS = r"""
     if (!w) return;
     cv.width = w;
     cv.height = Math.round(Math.min(w * 0.72, 560));
-    draw();
+    draw(cursor);
   }
   window.addEventListener('resize', size);
   onShow = size;
@@ -932,12 +987,11 @@ def build(payload, refresh=0) -> str:
     a = out.append
     a("<title>%s Match Coach</title>" % esc(player))
     if refresh:
-        # ponytail: meta refresh, not a websocket. The page is a file:// URL, so
-        # fetch() to poll Last-Modified is CORS-blocked and any live-reload
-        # needs a server. Browsers restore scroll position on reload, so this
-        # costs nothing visible. Only the watcher sets it -- a published
-        # snapshot would just re-request itself forever.
-        a('<meta http-equiv="refresh" content="%d">' % refresh)
+        # NOT <meta http-equiv="refresh">. That reloaded unconditionally, so a
+        # guided run-through was thrown away mid-replay and the page snapped
+        # back to the first tab -- it read as the page changing tabs by itself.
+        # The script reloads only once you are idle and not watching a replay.
+        a("<script>window.__RELOAD_SECS__=%d;</script>" % refresh)
     a('<link rel="preconnect" href="https://fonts.googleapis.com">')
     a('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>')
     a('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
