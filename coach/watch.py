@@ -343,9 +343,12 @@ def rebuild(cache, out_path):
                       "team_size": d.get("team_size"),
                       "lateral_conceded": d.get("lateral_conceded"),
                       "separation": d.get("separation"),
+                      "separation_lateral": d.get("separation_lateral"),
                       # The viewer hides the marker below this: a position that
                       # does not tell holding from conceding is not advice.
-                      "usable": (d.get("separation") or 0) >= 0.05}
+                      "usable": max(d.get("separation") or 0,
+                                    d.get("separation_lateral") or 0) >= 0.05,
+                      "depth_meaningful": (d.get("separation") or 0) >= 0.05}
             except Exception:
                 sh = {}
         if sh and pro.is_file():

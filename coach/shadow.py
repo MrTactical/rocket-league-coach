@@ -105,7 +105,13 @@ def summarise(held, conceded):
         # How far apart holding and conceding actually are. If this is small
         # the measurement does not discriminate, and a marker drawn from it
         # would be decoration wearing the clothes of advice.
+        #
+        # Reported for BOTH axes because they disagree. On 24 matches depth
+        # separated by 0.10 and looked like the finding; at 100 matches it fell
+        # to 0.04 and stopped meaning anything, while lateral held up at 0.12.
+        # A single "separation" number would have hidden that.
         "separation": abs((_median(cd) or 0.0) - (_median(hd) or 0.0)),
+        "separation_lateral": abs((_median(cl) or 0.0) - (_median(hl) or 0.0)),
     }
 
 

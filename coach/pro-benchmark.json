@@ -9,6 +9,7 @@
     "separation": 0.046344344200755117,
     "matches": 30,
     "playlist": "ranked-standard",
-    "fetched": "2026-08-24"
+    "fetched": "2026-08-24",
+    "separation_lateral": 0.041649050145284916
   }
 }
