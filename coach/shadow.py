@@ -31,8 +31,16 @@ MIN_SPAN = 1200.0     # ball too close to the net for a fraction to mean much
 LATERAL_MIN_X = 600.0 # ball too central for a lateral ratio to mean much
 
 
-def shadow_stats(match):
-    """(held, conceded) -- each a list of {depth, lateral} for one match."""
+def shadow_stats(match, who=None):
+    """
+    (held, conceded) -- each a list of {depth, lateral} for one match.
+
+    `who` restricts the measurement to that player's team. Without it BOTH
+    teams are measured, which is right for a population benchmark ("where do
+    Grand Champions stand") and wrong for a personal one -- the numbers were
+    labelled "you" while pooling the opponents in your own lobbies. Correcting
+    that halved the lateral effect, from 0.13 separation to 0.07.
+    """
     held, conceded = [], []
     if not match.samples or not match.goals_meta or not match.teams:
         return held, conceded
@@ -45,7 +53,8 @@ def shadow_stats(match):
         goals_by_team.setdefault(g.get("PlayerTeam"), []).append(
             match.samples[idx]["t"])
 
-    for team in (0, 1):
+    only = match.teams.get(who) if who else None
+    for team in ((only,) if only is not None else (0, 1)):
         sgn = 1.0 if team == 0 else -1.0
         own_y = -5120.0 * sgn
         against = goals_by_team.get(1 - team, [])
@@ -120,13 +129,18 @@ def summarise(held, conceded):
 ME_OUT = None      # set in main(), keeps the import side-effect free
 
 
-def measure_local(limit=60, team_size=None, verbose=True):
+def measure_local(limit=60, team_size=None, verbose=True, player=None):
     """Run the same measurement over your own recent replays."""
     import glob
     import os
+    from pathlib import Path
+
     from coach.timeline import DEMOS, load
 
-    files = sorted(glob.glob(str(DEMOS / "*.replay")), key=os.path.getmtime)
+    extra = Path(__file__).resolve().parents[1] / "coach" / ".pro-replays"
+    files = sorted(glob.glob(str(DEMOS / "*.replay"))
+                   + (glob.glob(str(extra / "*.replay")) if extra.is_dir() else []),
+                   key=os.path.getmtime)
     held, conceded, used = [], [], 0
     for f in files[-limit:]:
         try:
@@ -135,7 +149,12 @@ def measure_local(limit=60, team_size=None, verbose=True):
             continue
         if team_size and m.team_size != team_size:
             continue
-        h, c = shadow_stats(m)
+        who = None
+        if player:
+            who = m.resolve(player)
+            if who is None:
+                continue          # a replay you are not in
+        h, c = shadow_stats(m, who)
         if not h and not c:
             continue
         held += h
@@ -158,10 +177,14 @@ def main():
         description="Measure where your covering defender stands.")
     ap.add_argument("--limit", type=int, default=60)
     ap.add_argument("--team-size", type=int, default=3)
+    ap.add_argument("--player", help="measure only this player's team")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    out = measure_local(args.limit, args.team_size)
+    from coach.watch import resolve_identity
+    who = args.player or resolve_identity()
+    print("measuring %r only" % who)
+    out = measure_local(args.limit, args.team_size, player=who)
     (root / "coach" / "shadow-me.json").write_text(
         json.dumps(out, indent=2), encoding="utf-8")
 

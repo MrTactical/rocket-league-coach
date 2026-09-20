@@ -254,3 +254,39 @@ can be trusted.
 Deliberately NOT shipped, so the next measurement stays attributable:
 AERIAL_MIN_BOOST is inert, and AERIAL_BOOST_RESERVE 12 -> 4 is worth +20.4%
 candidates.
+
+---
+
+# Held items shipped, 2026-08-30
+
+Both boost-gate items from "Not done" above are now in, together, because they
+are the same class of change and move the same number:
+
+    AERIAL_BOOST_RESERVE   12 -> 4
+    AERIAL_MIN_BOOST       25 -> 10   (measurably inert; kept as a nominal floor)
+
+One match each side, 3v3-measure, six Allies:
+
+    run                       rows    aerial   on high balls   reserve-rejects
+    champion, reserve 12     19280       473          8.80%                217
+    measured,  reserve  4    13200       463         11.37%                195
+
++29% relative on aerials-per-high-ball. Single match per arm, so treat it as
+directional -- the resume plan below still applies.
+
+Also established this session, and it rules out a whole line of attack:
+
+  * The SKILL PRESET is not the lever. Champion preset flew LESS than a
+    profile measured from a Diamond player (6.2% vs 8.68% on high balls in the
+    first pair of runs). The humanizer declined 7-9 aerials against 1,462-2,239
+    `no_lead` rejections, so execution quality is not what suppresses aerials.
+  * `no_lead` is ~94% of all aerial rejections and fires during the SEARCH,
+    before boost or skill are consulted. It means the ball is above
+    AERIAL_MIN_Z but `dt < aerial_lead(z)` on that slice.
+
+Cause 1 from the audit -- the ordinal discarding 88.4% of aerial proposals --
+is still the biggest unfixed item. AERIAL_BONUS pre-emption addressed the
+"who is first man" half; it did not change that ord>=1 never builds a Strike.
+
+TO RESUME: unchanged from above -- 3-4 matches per arm, compare distributions
+not points, watch the clash rate against the 2.49-5.30% unmodified band.

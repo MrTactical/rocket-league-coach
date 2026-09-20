@@ -1,13 +1,12 @@
 {
-  "depth_held": 0.2404513501865145,
-  "depth_conceded": 0.28526995567103075,
-  "lateral_held": 0.3534349567493628,
-  "lateral_conceded": 0.4749970722567045,
-  "n_held": 47099,
-  "n_conceded": 3945,
-  "separation": 0.044818605484516244,
-  "matches": 100,
-  "playlist": "ranked-standard",
-  "fetched": "2026-08-24",
-  "separation_lateral": 0.1215621155073417
+  "depth_held": 0.23221444468627356,
+  "depth_conceded": 0.3084716649445108,
+  "lateral_held": 0.32676024043107255,
+  "lateral_conceded": 0.4844161189338854,
+  "n_held": 45114,
+  "n_conceded": 3566,
+  "separation": 0.07625722025823722,
+  "separation_lateral": 0.15765587850281287,
+  "matches": 193,
+  "team_size": 3
 }

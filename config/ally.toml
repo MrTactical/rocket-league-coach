@@ -16,6 +16,18 @@
 # less often.
 rank = "diamond"
 
+# A measured profile, which overrides `rank` entirely when set. Generate one
+# from your own replays:
+#
+#   python coach/profile_export.py --player YOURNAME --team-size 3 #          --out bot/profile-me.json
+#
+# The rank band inside that file still supplies reaction time and aim error --
+# a replay cannot show what a player intended, so those two are not derivable
+# from it. Everything else comes from how you actually play.
+#
+# Env override for one run: ALLY_PROFILE=bot/profile-me.json
+# profile_file = "profile-me.json"
+
 # Fixed RNG seed for the human-error model. 0 = random each match.
 # Set a non-zero value if you want repeatable behaviour while testing.
 seed = 0

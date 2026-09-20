@@ -313,6 +313,11 @@ def compute(match, who) -> dict:
                 "spawn": spawn,
                 "reach": reach,
                 "front": front,
+                # Where the SECOND man stood when the ball was struck --
+                # "cheating up". Bimodal in practice: about 2000 uu (cheated)
+                # or about 4800 (stayed home).
+                "mate2_d": (sorted(ours.values())[1]
+                            if len(ours) > 1 else None),
                 "went": bool(went),
                 "took": bool(lead == name and went),
                 "with_mate": with_mate,
@@ -338,6 +343,18 @@ def compute(match, who) -> dict:
         res["ok"] = bool(ks)
         gone = [k for k in ks if k["went"]]
         res["went"] = len(gone)
+
+        # Cheating up: did having the second man advanced actually win the
+        # kickoff? Outcome is where the ball sits three seconds later.
+        CHEAT_UU = 2200.0
+        up = [k for k in ks if k.get("mate2_d") is not None
+              and k["mate2_d"] < CHEAT_UU and k.get("ball_y3") is not None]
+        back = [k for k in ks if k.get("mate2_d") is not None
+                and k["mate2_d"] >= CHEAT_UU and k.get("ball_y3") is not None]
+        res["cheat_n"] = len(up)
+        res["cheat_won"] = sum(1 for k in up if k["ball_y3"] > 0)
+        res["back_n"] = len(back)
+        res["back_won"] = sum(1 for k in back if k["ball_y3"] > 0)
         res["took"] = sum(1 for k in ks if k["took"])
         res["first_touch"] = sum(1 for k in gone if k["toucher"] == name)
         res["beaten"] = sum(1 for k in gone if k["toucher"] != name)
@@ -528,6 +545,11 @@ def tips(result, match, who) -> list[str]:
             "On %d kickoffs you had the spawn closest to the ball and did not "
             "go for it, which hands the opponents a free first touch. The "
             "front spawn takes the kickoff." % r["skipped_front"])
+
+    # NOTE: no cheating-up tip here. One match holds about seven
+    # kickoffs, so any threshold strong enough to trust cannot be
+    # reached inside a single match -- the comparison is made over
+    # the whole record in page.py instead, where it has hundreds.
 
     if r["went_off_role"] >= 3:
         out.append(

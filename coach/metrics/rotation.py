@@ -32,6 +32,8 @@ Definitions, because "last man" means two different things to two players:
 from __future__ import annotations
 
 import math
+
+from coach import possession as P
 import statistics as st
 
 TITLE = "Rotation and team shape"
@@ -181,6 +183,7 @@ def _compute(match, who):
         sign = float(match.attack_sign(name))
     except Exception:
         sign = 1.0
+    my_team = match.teams.get(name)
     roster = len(mates) + 1
     nominal = getattr(match, "team_size", 0) or roster
     out.update({"n_mates": len(mates), "roster": roster,
@@ -216,6 +219,14 @@ def _compute(match, who):
     short_t = 0.0
     fm_t = 0.0
     nocover_t = 0.0
+    # Committing with nobody behind you is not one behaviour, it is two.
+    # Measured over 30 of this player's matches and replicated on 683k frames
+    # of Grand Champion play, being ahead of the ball is 0.33-0.41x the base
+    # concede risk during your OWN attack and 2.78-2.93x while the opponent
+    # has it in your half. Pooling them produced a single 1.7x "fault" that
+    # criticised the attack and the mistake in the same words.
+    nocover_exposed_t = 0.0
+    exposed_t = 0.0
     team_n_w = 0.0                 # sum of dt * (own team present in frame)
     first_spells, last_spells = [], []
     cycles = 0
@@ -281,11 +292,17 @@ def _compute(match, who):
                 if crowded:
                     dc_t += step
 
+            ph = P.phase(s, my_team, sign)
+            if (me["pos"][1] * sign) > (ball[1] * sign) and P.is_exposed(ph):
+                exposed_t += step
+
             if rank == 1:
                 fm_t += step
                 ball_depth = ball[1] * sign
                 if not any(q[1] * sign < ball_depth for q in mate_pos):
                     nocover_t += step
+                    if P.is_exposed(ph):
+                        nocover_exposed_t += step
                 if runF is None:
                     runF = [t, t + step]
                 else:
@@ -369,6 +386,8 @@ def _compute(match, who):
                        if (resets + rechallenges) else None),
         "reset_lag": st.median(lags) if lags else None,
         "no_cover": _pct(nocover_t, fm_t),
+        "no_cover_exposed": _pct(nocover_exposed_t, fm_t),
+        "exposed_s": exposed_t,
         "fm_time": fm_t,
         "segments": len(segs),
     })
@@ -425,6 +444,9 @@ def render(result):
         if r.get("reset_lag") is not None:
             note += ", median %.1f s to get there" % r["reset_lag"]
         lines.append(_row("reset to last man", "%.0f %%" % r["reset_rate"], note))
+    lines.append(_row("no cover, they have it", "%.0f %%"
+                      % r.get("no_cover_exposed", 0.0),
+                      "the state that actually precedes goals"))
     lines.append(_row("no cover behind you", "%.0f %%" % r.get("no_cover", 0.0),
                       "of your time as first man"))
 
@@ -542,11 +564,24 @@ def tips(result, match, who):
 
     # 5. Committing with the net empty behind you.
     nc = r.get("no_cover", 0.0)
-    if nc > 30.0 and r.get("fm_time", 0.0) > 45.0:
+    nce = r.get("no_cover_exposed", 0.0)
+    if nce > 12.0 and r.get("fm_time", 0.0) > 45.0:
+        out.append(
+            "%.0f%% of your time as first man has nobody goal-side behind "
+            "you AND the opponent touched the ball last in your half. That "
+            "is the state that costs goals -- measured at about 2.8x the "
+            "normal chance of conceding within six seconds on Champion "
+            "replays, and 2.9x on Grand Champion ones. Committing "
+            "with no cover during your OWN attack is not the same thing and "
+            "is measurably safer than average, so this is not 'stop "
+            "committing' -- it is 'stop committing once they have it'."
+            % nce)
+    elif nc > 30.0 and r.get("fm_time", 0.0) > 45.0:
         out.append(
             "%.0f%% of your time as first man has no teammate goal-side of "
-            "the ball behind you. Before committing, check the shadow: if "
-            "nobody is home, delay and shepherd instead of challenging." % nc)
+            "the ball behind you, but most of it is during your own team's "
+            "possession, which measures as safer than average. Worth "
+            "knowing rather than fixing." % nc)
 
     if r.get("fm_max", 0.0) > 12.0 and r.get("fm_mean", 0.0) > 4.5:
         out.append(

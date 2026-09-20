@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -63,7 +64,12 @@ REPORT = (DATA if FROZEN else ROOT) / "coach-report.html"
 CACHE = DATA / ".replay-cache.json"
 RANK = DATA / "rank.json"
 KEY_HINT_SHOWN = False
-REFRESH_SECS = 30    # how often the written page re-loads itself
+# Off by default. The page used to reload itself whenever you had not
+# clicked anything for 30 seconds -- but READING is exactly that state, so it
+# reloaded out from under you precisely when you were using it. There is no
+# way to detect a new report from a file:// page without reloading it, so the
+# honest choice is not to: press F5 after a match, or pass --refresh N.
+REFRESH_SECS = 0
 
 
 GAME_PROCESS = "RocketLeague.exe"
@@ -89,7 +95,7 @@ def game_running():
         return GAME_PROCESS.lower() in (out or "").lower()
 
 
-def auto_loop(cache, modules, out_path, verbose, interval):
+def auto_loop(cache, modules, out_path, verbose, interval, base=None):
     """
     Sleep until Rocket League runs, watch while it does, sweep once after.
 
@@ -115,6 +121,7 @@ def auto_loop(cache, modules, out_path, verbose, interval):
                 sweep(cache, modules, out_path, verbose)
             was_up = up
             time.sleep(interval if up else IDLE_POLL)
+            restart_if_stale(base)
     except KeyboardInterrupt:
         print()
         print("stopped")
@@ -158,16 +165,46 @@ def key_for(path):
     return "%s|%d|%d" % (os.path.basename(path), st.st_size, int(st.st_mtime))
 
 
+def code_version():
+    """
+    Fingerprint of the code whose OUTPUT is cached.
+
+    Only the parser and the metric modules -- those decide what lands in a
+    cache entry. page.py and this file render from entries at rebuild time, so
+    editing them does not need to invalidate anything.
+
+    Without this, editing a metric leaves every already-cached match serving
+    the old numbers forever, and only brand-new replays show the change. That
+    reads exactly like the metric not working.
+    """
+    h = hashlib.sha256()
+    files = [ROOT / "coach" / "timeline.py"]
+    files += sorted((ROOT / "coach" / "metrics").glob("*.py"))
+    for f in files:
+        try:
+            h.update(f.read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:12]
+
+
 def load_cache():
+    now = code_version()
     if CACHE.is_file():
         try:
-            return json.loads(CACHE.read_text(encoding="utf-8"))
+            c = json.loads(CACHE.read_text(encoding="utf-8"))
+            if c.get("code") == now:
+                return c
+            print("metric code changed -- re-measuring every replay")
+            return {"entries": {}, "player": c.get("player"), "code": now,
+                    "track": c.get("track")}
         except Exception:
             print("cache was unreadable, starting fresh")
-    return {"entries": {}, "player": None}
+    return {"entries": {}, "player": None, "code": now}
 
 
 def save_cache(cache):
+    cache["code"] = code_version()
     tmp = CACHE.with_suffix(".tmp")
     tmp.write_text(json.dumps(cache), encoding="utf-8")
     tmp.replace(CACHE)
@@ -259,7 +296,8 @@ def refresh_shadow(cache, force=False):
     recent.sort(key=lambda e: e.get("date") or "")
     size = (recent[-1].get("team_size") if recent else 3) or 3
     try:
-        out = measure_local(limit=60, team_size=size, verbose=False)
+        out = measure_local(limit=300, team_size=size, verbose=False,
+                            player=cache.get("player"))
     except Exception:
         return False
     if not out.get("n_held"):
@@ -314,6 +352,14 @@ def fetch_benchmark_once():
           % (st["depth_held"], st["n_held"], st["matches"]))
 
 
+_REFRESH_OVERRIDE = [None]
+
+
+def _refresh_secs():
+    v = _REFRESH_OVERRIDE[0]
+    return REFRESH_SECS if v is None else v
+
+
 def rebuild(cache, out_path):
     # Entries recorded only so a file is never retried are bookkeeping, not
     # matches. Counting them gave a header reading "93 matches - 4W / 3L".
@@ -329,8 +375,14 @@ def rebuild(cache, out_path):
     # The 'be here' marker takes its position from measurement, not a constant.
     # Both files are optional: without them the marker falls back and says so.
     if payload["track"]:
-        me = ROOT / "coach" / "shadow-me.json"
-        pro = ROOT / "coach" / "pro-benchmark.json"
+        # DATA, not ROOT/coach. refresh_shadow() and fetch_benchmark_once()
+        # both WRITE to DATA, which is the exe's own folder in a frozen build
+        # and coach/ from source. Reading from ROOT/coach meant the packaged
+        # build measured fresh numbers, wrote them, then rendered the marker
+        # from a path nothing had written -- silently falling back to the
+        # default while the console reported the new figures.
+        me = DATA / "shadow-me.json"
+        pro = DATA / "pro-benchmark.json"
         sh = {}
         if me.is_file():
             try:
@@ -373,7 +425,7 @@ def rebuild(cache, out_path):
             payload["rank"] = json.loads(rank_path.read_text(encoding="utf-8"))
         except Exception as e:
             print("  rank.json unreadable (%s), continuing without it" % e)
-    Path(out_path).write_text(build(payload, refresh=REFRESH_SECS),
+    Path(out_path).write_text(build(payload, refresh=_refresh_secs()),
                               encoding="utf-8")
     return len(payload["matches"])
 
@@ -507,6 +559,63 @@ def post_match(entry, cache):
     print()
 
 
+def source_fingerprint():
+    """Mtimes of every module this process has loaded from coach/."""
+    out = {}
+    for f in sorted((ROOT / "coach").rglob("*.py")):
+        try:
+            out[str(f)] = f.stat().st_mtime
+        except OSError:
+            pass
+    return out
+
+
+RESTART_CODE = 3
+
+
+def restart_if_stale(base):
+    """
+    Exit with RESTART_CODE when the source changes under a running watcher.
+
+    Python loads modules once at start, so editing coach/*.py while this is
+    running changes nothing until it is restarted. That has produced several
+    "it stopped working" reports where the watcher was faithfully running
+    month-old logic: a stale page layout, a stale report path, a stale replay
+    source. Each looked like a different bug.
+
+    This used to re-exec in place with os.execv. On Windows the venv's
+    python.exe is a launcher shim that spawns the real interpreter as a child,
+    and replacing the child's image leaves the shim and the console script out
+    of step -- the watcher simply disappeared. Exiting with a distinct code and
+    letting coach-watch.bat loop is duller and survives that.
+    """
+    if source_fingerprint() == base:
+        return False
+    print()
+    print("  source changed -- restarting to pick it up")
+    sys.stdout.flush()
+    sys.exit(RESTART_CODE)
+
+
+def replay_sources():
+    """
+    Everywhere replays can come from.
+
+    The game prunes its own Demos folder, so a ballchasing account is often a
+    much longer record than the disk. Downloads land in the same cache the
+    benchmark uses, which also holds OTHER players' replays -- those are not
+    filtered out here on purpose: the identity check further down already
+    skips any replay this player is not in, so a Grand Champion's game is
+    dropped for the same reason and by the same code as a spectated one.
+    """
+    dirs = [DEMOS, ROOT / "coach" / ".pro-replays"]
+    out = []
+    for d in dirs:
+        if Path(d).is_dir():
+            out += glob.glob(str(Path(d) / "*.replay"))
+    return sorted(set(out), key=os.path.getmtime)
+
+
 def sweep(cache, modules, out_path, verbose):
     # MMR moves when you queue, not when a replay lands, so it is checked
     # before the no-new-replays early return -- otherwise a session where you
@@ -516,7 +625,7 @@ def sweep(cache, modules, out_path, verbose):
         print("  ~ MMR now %d (%s, %s)"
               % (last["mmr"], last["tier_name"], last["playlist_name"]))
 
-    files = sorted(glob.glob(str(DEMOS / "*.replay")), key=os.path.getmtime)
+    files = replay_sources()
     known = set(cache["entries"])
     fresh = [f for f in files if key_for(f) not in known]
     if not fresh:
@@ -569,6 +678,19 @@ def sweep(cache, modules, out_path, verbose):
         print("  + %s   %s" % (entry.get("date") or name, headline(entry)))
         post_match(entry, cache)
 
+        # Rebuild as we go on a long run. Changing a metric wipes the cache
+        # and re-measures every replay, which takes many minutes -- and the
+        # page was only written at the END, so for the whole of that time the
+        # report on screen said "No matches found". Filling in progressively
+        # is the difference between "working" and "broken" from the outside.
+        if done % 20 == 0:
+            try:
+                rebuild(cache, out_path)
+                save_cache(cache)
+                print("    ... page updated (%d done)" % done)
+            except Exception:
+                pass
+
     if absent:
         print("  . %d replay(s) skipped -- you are not a player in them"
               % len(absent))
@@ -582,7 +704,34 @@ def sweep(cache, modules, out_path, verbose):
     return done
 
 
+def be_polite():
+    """
+    Drop to below-normal CPU priority.
+
+    This parses replays while Rocket League is running -- that is the point of
+    it -- and a full re-measure is a few hundred replays back to back. At
+    normal priority that competes with the game for cores mid-match.
+    Below-normal means it only gets what the game is not using: a slower
+    rebuild, and no dropped frames.
+    """
+    try:
+        import ctypes
+        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+        k = ctypes.windll.kernel32
+        # The restype matters. GetCurrentProcess returns the pseudo-handle
+        # (HANDLE)-1, and ctypes defaults to a 32-bit int return, so on 64-bit
+        # Windows it arrives truncated and SetPriorityClass silently fails --
+        # returning 0, which is easy to miss when the call is in a try/except
+        # that swallows everything.
+        k.GetCurrentProcess.restype = ctypes.c_void_p
+        k.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        k.SetPriorityClass(k.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass          # not Windows, or refused: never worth failing over
+
+
 def main() -> int:
+    be_polite()
     ap = argparse.ArgumentParser(description="Keep the coaching page current.")
     ap.add_argument("--interval", type=float, default=15.0,
                     help="seconds between checks (default 15)")
@@ -591,6 +740,17 @@ def main() -> int:
     ap.add_argument("--out", default=str(REPORT))
     ap.add_argument("--verbose", action="store_true",
                     help="print the full analysis for each new match")
+    ap.add_argument("--refresh", type=int, default=REFRESH_SECS,
+                    metavar="N",
+                    help="make the report reload itself every N idle seconds "
+                         "(default 0, off -- it interrupts reading)")
+    ap.add_argument("--set-mmr", type=int, metavar="N",
+                    help="set your current MMR for the main playlist")
+    ap.add_argument("--set-rank", metavar="NAME",
+                    help='set your current rank, e.g. "Diamond III Div I"')
+    ap.add_argument("--retrack", action="store_true",
+                    help="rebuild only the replay-viewer track from the newest "
+                         "match (cheap; use after changing coach/viewer.py)")
     ap.add_argument("--reset", action="store_true",
                     help="throw away the cache and re-analyse everything")
     ap.add_argument("--player", help="your in-game name, if detection is wrong")
@@ -620,10 +780,25 @@ def main() -> int:
         print("No metric modules in coach/metrics/.")
         return 1
 
+    extra = ROOT / "coach" / ".pro-replays"
+    n_extra = len(glob.glob(str(extra / "*.replay"))) if extra.is_dir() else 0
     print("watching %s" % DEMOS)
+    if n_extra:
+        print("  plus %d replays downloaded from ballchasing" % n_extra)
     print("  you are %r" % cache["player"])
+    # Split the total. "331 replays already seen" next to a report headed
+    # "276 matches" reads like one of the two is wrong; the difference is the
+    # benchmark replays, which are measured for the positional comparison but
+    # are somebody else's matches and are never counted as yours.
+    seen = len(cache["entries"])
+    mine = sum(1 for v in cache["entries"].values()
+               if v.get("resolved_name") and (v.get("sections") or {}))
+    other = seen - mine
     print("  %d replays already seen, %d metric families loaded"
-          % (len(cache["entries"]), len(modules)))
+          % (seen, len(modules)))
+    if other:
+        print("    %d are your matches, %d are benchmark replays you are not "
+              "in" % (mine, other))
     print("  " + save_replay_hint())
     if not (DATA / "pro-benchmark.json").is_file() and not KEY_HINT_SHOWN:
         from coach.pro import api_key as _k
@@ -635,10 +810,64 @@ def main() -> int:
     refresh_shadow(cache)
     save_cache(cache)
 
-    if args.auto:
-        auto_loop(cache, modules, args.out, args.verbose, args.interval)
+    _REFRESH_OVERRIDE[0] = args.refresh
+
+    if args.set_mmr is not None or args.set_rank:
+        # Rocket League no longer writes MMR to Launch.log, so this is the
+        # only way the number moves. Keeping a date on it means the page can
+        # admit how old it is instead of showing a stale rank as current.
+        try:
+            d = json.loads(RANK.read_text(encoding="utf-8"))
+        except Exception:
+            d = {"source": "entered by hand", "playlists": []}
+        pls = d.setdefault("playlists", [])
+        main = next((q for q in pls if q.get("main")), None)
+        if main is None:
+            main = {"name": "Ranked Standard 3v3", "main": True}
+            pls.append(main)
+        if args.set_mmr is not None:
+            if main.get("mmr") and main["mmr"] > (main.get("season_peak") or 0):
+                main["season_peak"] = main["mmr"]
+            main["mmr"] = args.set_mmr
+        if args.set_rank:
+            main["rank"] = args.set_rank
+        d["updated"] = time.strftime("%Y-%m-%d %H:%M")
+        RANK.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        print("rank updated: %s, %s MMR" % (main.get("rank"), main.get("mmr")))
+        rebuild(load_cache(), args.out)
+        print("page rebuilt -> %s" % args.out)
         return 0
 
+    if args.retrack:
+        # The viewer track is built once, when a replay is first seen, and
+        # then cached. Editing viewer.py therefore changes nothing visible
+        # until the next match -- so re-derive it from the newest replay you
+        # are actually in, which costs one parse instead of re-reading every
+        # replay on disk.
+        who = cache.get("player") or resolve_identity()
+        for f in reversed(replay_sources()):
+            try:
+                m = load(f)
+            except Exception:
+                continue
+            w = m.resolve(who) if who else None
+            if w is None:
+                continue
+            cache["track"] = build_track(m, w)
+            save_cache(cache)
+            rebuild(cache, args.out)
+            print("track rebuilt from %s -> %s"
+                  % (os.path.basename(f), args.out))
+            return 0
+        print("no replay found that you are a player in")
+        return 1
+
+    if args.auto:
+        auto_loop(cache, modules, args.out, args.verbose, args.interval,
+                  source_fingerprint())
+        return 0
+
+    base = source_fingerprint()
     n = sweep(cache, modules, args.out, args.verbose)
     if args.once:
         if not n:

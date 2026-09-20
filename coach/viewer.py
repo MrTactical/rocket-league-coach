@@ -8,7 +8,14 @@ going closely enough for a replay at this scale.
 
 Frame layout, flat for size:
 
-    [t, ball_x, ball_y, ball_z, (car_x, car_y, car_z, car_heading) * N]
+    [t, ball_x, ball_y, ball_z,
+     (x, y, z, yaw, boost, speed, flags, steer) * N]
+
+`flags` is a bitfield: 1 airborne, 2 upright, 4 ball cam, 8 supersonic,
+16 powerslide.
+
+A car not present in a frame is stored as four nulls, never as zeros: (0, 0)
+is a real position on this pitch.
 
 Everything is rounded to whole units. At ~10 Hz a full match is a few hundred
 kilobytes; at native rate with floats it is megabytes, for precision nobody can
@@ -24,6 +31,7 @@ from __future__ import annotations
 import math
 
 from coach.metrics.recovery import _homeward
+from coach.timeline import upright
 
 PLAY_HZ = 10
 GOAL_LEAD = 4.0        # the window the recovery metric judges
@@ -40,6 +48,14 @@ def build_track(match, who):
     step = max(1, round(len(match.samples) / dur / PLAY_HZ))
     t0 = match.samples[0]["t"]
 
+    # Heading comes from velocity, which is meaningless when a car is barely
+    # moving: at 20 uu/s the direction is mostly noise, so a stopped car spins
+    # on the spot frame to frame, and a car at an exact standstill snapped to
+    # 0 degrees. Below walking pace, keep pointing where it last actually
+    # went.
+    HEAD_MIN_SPEED = 260.0
+    last_head = {n: 0 for n in names}
+
     frames = []
     for s in match.samples[::step]:
         row = [round(s["t"] - t0, 1),
@@ -47,12 +63,34 @@ def build_track(match, who):
         for n in names:
             c = s["cars"].get(n)
             if c:
-                vx, vy = c["vel"][0], c["vel"][1]
-                head = round(math.degrees(math.atan2(vy, vx))) if (vx or vy) else 0
+                vx, vy, vz = c["vel"]
+                rot = c.get("rot")
+                if rot is not None:
+                    # Real orientation. Heading used to be inferred from the
+                    # velocity vector, which says where a car is GOING and not
+                    # where it is POINTING -- it cannot see a car reversing or
+                    # drifting, and it is pure noise at a standstill.
+                    last_head[n] = round(rot[0])
+                elif math.hypot(vx, vy) >= HEAD_MIN_SPEED:
+                    last_head[n] = round(math.degrees(math.atan2(vy, vx)))
+                up = upright(rot)
+                flags = ((1 if c["pos"][2] > 60 else 0)
+                         | (2 if up else 0)
+                         | (4 if c.get("ballcam") else 0)
+                         | (8 if math.dist((0, 0, 0), c["vel"]) > 2200 else 0)
+                         | (16 if c.get("handbrake") else 0))
                 row += [round(c["pos"][0]), round(c["pos"][1]),
-                        round(c["pos"][2]), head]
+                        round(c["pos"][2]), last_head[n],
+                        round(c.get("boost") or 0),
+                        round(math.dist((0, 0, 0), c["vel"])),
+                        flags,
+                        round((c.get("steer") or 0.0) * 100)]
             else:
-                row += [0, 0, 0, 0]
+                # null, not zeros. Zeros are IN BAND: a car driving over the
+                # centre spot rounds to x=0,y=0 and was indistinguishable from
+                # "not in this frame", so it blinked out of the viewer -- right
+                # where the ball spawns and play concentrates.
+                row += [None] * 8
         frames.append(row)
 
     return {
@@ -61,7 +99,7 @@ def build_track(match, who):
         "me": names.index(who) if who in names else 0,
         "my_team": match.teams.get(who, 0),
         "frames": frames,
-        "stride": 4,
+        "stride": 8,
         "lead": GOAL_LEAD,
         "slow": SLOW_FOR,
         "moments": _moments(match, who, t0),

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core.vec import Vec3, clamp
 
@@ -58,6 +58,10 @@ class SkillProfile:
 
     # How much worse things get under pressure (opponent close, high speed).
     pressure_sensitivity: float = 0.5
+
+    # Set by profile_from_file: where this player actually goes, as opposed
+    # to how well they execute. Empty for the generic rank presets.
+    measured: dict = field(default_factory=dict)
 
     # Speedflip reliability on kickoff.
     speedflip_skill: float = 0.6
@@ -287,3 +291,51 @@ def rotate_aim(direction: Vec3, angle: float) -> Vec3:
 
 def get_profile(name: str) -> SkillProfile:
     return RANKS.get(name.lower().strip(), RANKS["diamond"])
+
+
+def profile_from_file(path) -> SkillProfile:
+    """
+    Load a profile derived from real play by coach/profile_export.py.
+
+    The rank band supplies the axes a replay cannot show -- reaction time and
+    aim error, which need to know what the player INTENDED and so are not
+    recoverable from position data. Everything the replay does show overrides
+    the preset.
+
+    Falls back to the diamond preset on any failure: a practice bot that
+    refuses to start because a JSON file moved is worse than one running on
+    generic numbers, and the log line says which happened.
+    """
+    import json
+    import logging
+    from dataclasses import replace
+
+    log = logging.getLogger("ally.profile")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as exc:
+        log.warning("could not read measured profile %s (%s) -- "
+                    "falling back to the diamond preset", path, exc)
+        return RANKS["diamond"]
+
+    skill = d.get("skill") or {}
+    base = RANKS.get(str(skill.get("band", "")).lower(), RANKS["diamond"])
+    fields = {}
+    for key in ("aerial_confidence", "whiff_chance", "input_noise",
+                "wavedash_rate", "speedflip_skill", "reaction_time",
+                "aim_error", "pressure_sensitivity"):
+        if isinstance(skill.get(key), (int, float)):
+            fields[key] = float(skill[key])
+    prof = replace(base, name=str(d.get("name") or base.name), **fields)
+
+    # Rotation and movement are carried alongside so the decision layer can
+    # read them; they are not SkillProfile fields because they describe WHERE
+    # the bot goes rather than how well it executes.
+    prof.measured = {"rotation": d.get("rotation") or {},
+                     "movement": d.get("movement") or {},
+                     "mechanics": d.get("mechanics_per_10min") or {},
+                     "matches": (d.get("derived_from") or {}).get("matches")}
+    log.info("measured profile %r loaded from %d matches (band %s)",
+             prof.name, prof.measured["matches"], skill.get("band"))
+    return prof

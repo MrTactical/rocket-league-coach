@@ -26,3 +26,7 @@ RLArenaCollisionDumper.exe
 # ballchasing API key -- yours, identifies your account. Never commit.
 coach/ballchasing.key
 coach/.pro-replays/
+
+# Measured play profiles written by coach/profile_export.py. Each carries a
+# real player's in-game name and how they play. Generate your own; never commit.
+bot/profile-*.json

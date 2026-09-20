@@ -56,14 +56,50 @@ def _v(x, y, z):
 
 
 class Drill:
-    """One scenario: where the ball starts and roughly where the cars go."""
+    """
+    One scenario: where the ball starts and roughly where the cars go.
 
-    def __init__(self, name, ball_pos, ball_vel, spread=2200.0, height_bias=0.0):
+    `placement` overrides the default scatter when a drill is about a
+    SPECIFIC shape rather than a contested ball. It takes (team, index within
+    that team, ball position) and returns (x, y) for that car, or None to fall
+    back to the scatter.
+    """
+
+    def __init__(self, name, ball_pos, ball_vel, spread=2200.0, height_bias=0.0,
+                 placement=None, note=""):
         self.name = name
         self.ball_pos = ball_pos
         self.ball_vel = ball_vel
         self.spread = spread
         self.height_bias = height_bias
+        self.placement = placement
+        self.note = note
+
+
+def _exposed_placement(team, slot, ball):
+    """
+    The state the coach measured as costing the most goals.
+
+    Across 30 Champion matches a frame where you are ahead of the ball runs
+    2.78x the base chance of conceding within six seconds -- but ONLY while
+    the opponent has it in your half. During your own attack the same position
+    is 0.41x, safer than average. So this drill builds the expensive half
+    exactly: blue is defending, the ball is in blue's half with orange on it,
+    and blue's first man is stranded upfield past it.
+
+    Blue slot 0 is the one being trained: it starts beaten and has to recover.
+    """
+    bx, by = ball[0], ball[1]
+    if team == 0:                       # defending, own net at -5120
+        if slot == 0:
+            return (bx + 700.0, by + 2100.0)      # upfield, ahead of the ball
+        if slot == 1:
+            return (bx - 1500.0, by - 900.0)      # covering, but wide
+        return (bx + 400.0, by - 2600.0)          # last man, deep
+    # attacking side: one on the ball, the rest supporting behind it
+    if slot == 0:
+        return (bx + 260.0, by + 520.0)
+    return (bx - 900.0 + slot * 600.0, by + 1800.0)
 
 
 def build_drills() -> list[Drill]:
@@ -91,6 +127,14 @@ def build_drills() -> list[Drill]:
     d.append(Drill("wall", (3900, -800, 900), (-200, 300, 0)))
     # Loose ball scramble in front of goal.
     d.append(Drill("scramble", (300, -3200, 200), (-200, -300, 0), spread=1500.0))
+    # The measured one: beaten, ball in your half, opponent on it. Weighted
+    # three times because it is the state the numbers say costs the goals,
+    # and because recovering from it is a habit rather than a touch.
+    for _ in range(3):
+        d.append(Drill("exposed_recover", (400, -1900, 93), (-120, -900, 0),
+                       placement=_exposed_placement,
+                       note="you are ahead of the ball while they have it in "
+                            "your half -- 2.78x concede risk; turn and go"))
     return d
 
 
@@ -200,9 +244,18 @@ class Trainer(Script):
             # Spread each team behind the ball on its own side, so the drill
             # starts as a contest rather than a free hit.
             sign = -1.0 if player.team == 0 else 1.0
-            lane = (i // 2) - 1
-            x = lane * 1400.0 + j(-350, 350)
-            y = by + sign * (drill.spread + j(-400, 400))
+            spot = None
+            if drill.placement is not None:
+                slot = sum(1 for q in packet.players[:i] if q.team == player.team)
+                spot = drill.placement(player.team, slot, drill.ball_pos)
+            if spot is not None:
+                x = spot[0] + j(-200, 200)
+                y = spot[1] + j(-200, 200)
+            else:
+                lane = (i // 2) - 1
+                x = lane * 1400.0 + j(-350, 350)
+                y = by + sign * (drill.spread + j(-400, 400))
+            x = max(-3900.0, min(3900.0, x))
             y = max(-5000.0, min(5000.0, y))
             yaw = math.atan2(by - y, bx - x)
 
