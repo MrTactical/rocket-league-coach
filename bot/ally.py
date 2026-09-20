@@ -25,7 +25,8 @@ from rlbot.managers import Bot  # noqa: E402
 
 from bot.brain.comms import CommsHub  # noqa: E402
 from bot.brain.decide import Brain  # noqa: E402
-from bot.brain.humanize import Humanizer, get_profile  # noqa: E402
+from bot.brain.humanize import (Humanizer, get_profile,  # noqa: E402
+                                profile_from_file)
 from bot.brain.teammate import TeammateModel  # noqa: E402
 from bot.core.game import GameState  # noqa: E402
 from bot.core.vec import Vec3  # noqa: E402
@@ -57,6 +58,8 @@ def load_config() -> dict:
     # Environment overrides are handy for quick experiments.
     if os.environ.get("ALLY_RANK"):
         cfg["rank"] = os.environ["ALLY_RANK"]
+    if os.environ.get("ALLY_PROFILE"):
+        cfg["profile_file"] = os.environ["ALLY_PROFILE"]
     return cfg
 
 
@@ -82,8 +85,43 @@ class Ally(Bot):
 
     def initialize(self):
         cfg = self.cfg
-        rank = str(cfg.get("rank", "diamond"))
-        profile = get_profile(rank)
+        # A measured profile beats a rank label: "diamond" is an average of
+        # everyone at that rank and nobody plays like the average. Generate
+        # one with coach/profile_export.py and point `profile_file` at it.
+        prof_file = cfg.get("profile_file")
+        if prof_file:
+            # Resolve against BOTH the bot directory and the repo root. The
+            # config lives in bot/, so "profile-me.json" is natural there --
+            # but the generator prints "bot/profile-me.json", which is natural
+            # from the repo root, and joining that onto bot/ gives bot/bot/.
+            # Accept either rather than making the user think about it.
+            path = Path(prof_file)
+            if not path.is_absolute():
+                here = Path(__file__).resolve().parent
+                for cand in (here / path, here.parent / path):
+                    if cand.is_file():
+                        path = cand
+                        break
+                else:
+                    path = here / path      # let the loader log the miss
+            profile = profile_from_file(path)
+            rank = profile.name
+            # Through the BOT's logger, not a bare module one -- RLBot
+            # configures this and it actually reaches the console. The load
+            # failure was visible only because warnings pass a default root
+            # logger; the success was silent, which made "did the measured
+            # profile actually load" unanswerable from the match output.
+            m = getattr(profile, "measured", {}) or {}
+            self.logger.info(
+                "skill: MEASURED %r from %s matches (band %s, aerial %.2f, "
+                "whiff %.3f, noise %.3f)",
+                profile.name, m.get("matches", "?"), rank,
+                profile.aerial_confidence, profile.whiff_chance,
+                profile.input_noise)
+        else:
+            rank = str(cfg.get("rank", "diamond"))
+            profile = get_profile(rank)
+            self.logger.info("skill: preset %r (no measured profile set)", rank)
 
         # Name the profile after the human, so different people playing on
         # this machine get their own learned model.

@@ -59,9 +59,17 @@ WALL = "wall"
 # feasibility condition guarantees that cost is affordable; the arbiter then
 # ignored that number and applied a test 1.2-2.9x stricter, which is why the
 # bot essentially never flew. Use the cost the solver computed.
-AERIAL_MIN_BOOST = 25.0
+# Measurably inert: sweeping this 0/10/20/25 changed the outcome by 5 ticks in
+# 12,431 (0.04%), because the reserve gate below always binds first. Kept at a
+# nominal floor rather than deleted so the two call sites still read as a
+# deliberate "needs some boost" rather than looking like an oversight.
+AERIAL_MIN_BOOST = 10.0
 # Held back for the landing and the recovery afterwards.
-AERIAL_BOOST_RESERVE = 12.0
+# 12 -> 4, worth +20.4% aerial candidates when it was measured in the
+# 2026-08-23 audit (notes/why-the-bots-never-fly.md). Held back then so two
+# behavioural changes in one run stayed attributable; shipped now with the
+# inert MIN_BOOST, because both are boost-gate changes and move together.
+AERIAL_BOOST_RESERVE = 4.0
 
 # How much earlier a dodge must be than a plain ground touch to be preferred.
 DODGE_PREFERENCE = 0.1

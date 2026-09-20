@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -349,6 +350,20 @@ code{font-family:"IBM Plex Mono",monospace;background:var(--surface-2);
 .moments b{font-family:"IBM Plex Mono",monospace;color:var(--ink-3);
   margin-right:7px;font-weight:400}
 .ctrl button.ghost{background:none;color:var(--ink-2);border:1px solid var(--line)}
+.state{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));
+  gap:1px;margin-top:10px;background:var(--line);border:1px solid var(--line);
+  border-radius:3px;overflow:hidden}
+.state>div{background:var(--surface);padding:6px 9px;display:flex;
+  flex-direction:column;gap:1px}
+.state .k{font-size:.63rem;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--ink-3)}
+.state .v{font-family:"IBM Plex Mono",monospace;font-size:.88rem;
+  font-variant-numeric:tabular-nums;color:var(--ink)}
+.ctrl .rates{display:flex;gap:3px}
+.ctrl .rates button{background:none;color:var(--ink-3);border:1px solid var(--line);
+  padding:4px 8px;font-size:.76rem;min-width:34px}
+.ctrl .rates button.on{background:var(--accent-soft);color:var(--accent);
+  border-color:var(--accent)}
 .caption{margin-top:10px;padding:12px 15px;border-radius:3px;font-size:.9rem;
   background:var(--surface);border:1px solid var(--line);
   border-left:3px solid var(--accent);color:var(--ink);max-width:78ch}
@@ -436,8 +451,14 @@ VIEWER_JS = r"""
   var clock = document.getElementById('clock');
   var caption = document.getElementById('caption');
   var live = document.getElementById('live');
-  var pausedAt = -99, prevBall = null;
+  var pausedAt = -99, prevBall = null, lastPos = null;
+  var state = document.getElementById('state');
   var playing = false, guided = false, rate = 1, raf = null, last = 0;
+  // Declared with the rest of the playback state, not beside its buttons.
+  // stop() reads it and is defined further up; a `var` further down would be
+  // hoisted-but-undefined there, which is exactly the bug that erased every
+  // car from this viewer once already.
+  var userRate = 1;
   var T0 = T.frames[0][0], T1 = T.frames[T.frames.length - 1][0];
   var cursor = T0;                       // playback head, in seconds (float)
   // Always defend the near goal, whichever side was actually played --
@@ -465,16 +486,62 @@ VIEWER_JS = r"""
   var cam = {x: 0, y: 0, d: 11000};        // current, smoothed
   var want = {x: 0, y: 0, d: 11000};       // target for this frame
   var MIN_D = 5200, MAX_D = 17000, FOLLOW = 0.08;
+  var framed = {};        // which cars are currently in shot (hysteresis)
+  var snapNext = true;    // cut rather than glide on the next draw
+  var lastWant = null;    // previous target, for detecting a scene change
 
-  function planCamera(f) {
-    var pts = [[f.ball[0], f.ball[1]]];
-    var me = f.cars[T.me];
-    if (me) pts.push([me[0], me[1]]);
+  // Points worth keeping in shot at one instant: the ball, your car, and
+  // anyone close enough to the ball to be part of the play.
+  function framePoints(ball, cars, hyst) {
+    var pts = [[ball[0], ball[1], ball[2] || 0]];
+    var me = cars[T.me];
+    if (me) pts.push([me[0], me[1], me[2] || 0]);
     for (var c = 0; c < N; c++) {
-      var k = f.cars[c];
+      var k = cars[c];
       if (!k || c === T.me) continue;
-      var near = Math.hypot(k[0] - f.ball[0], k[1] - f.ball[1]);
-      if (near < 3400) pts.push([k[0], k[1]]);
+      var near = Math.hypot(k[0] - ball[0], k[1] - ball[1]);
+      // Hysteresis. With one 3400 threshold a car hovering near it joins and
+      // leaves the framed set every few frames, and the solved distance moves
+      // with it. Joining costs less than leaving, so the band is wide.
+      var now = hyst ? (framed[c] ? near < 4200 : near < 3000) : near < 3400;
+      if (hyst) framed[c] = now;
+      if (now) pts.push([k[0], k[1], k[2] || 0]);
+    }
+    return pts;
+  }
+
+  // Raw-frame accessor for lookahead, without building a full interpolated
+  // sample per frame.
+  function rawCars(row) {
+    var out = [];
+    for (var c = 0; c < N; c++) {
+      var o = 4 + c * STRIDE;
+      out.push(row[o] === null ? null
+               : [row[o], row[o + 1], row[o + 2], row[o + 3],
+                  row[o + 4], row[o + 5], row[o + 6], row[o + 7]]);
+    }
+    return out;
+  }
+
+  // The camera is solved for the next LOOKAHEAD seconds, not just for now.
+  //
+  // Framing the current instant alone means the camera is always reacting: the
+  // play spreads, the solved distance jumps, and the camera chases it. Taking
+  // the union over a short window instead means the target already knows what
+  // is coming, so it can be eased into gently and still have everything in
+  // shot when it arrives. Measured over this match it cuts the average
+  // frame-to-frame movement of the target by about a fifth.
+  var LOOKAHEAD = 1.2;
+  function planCamera(f, t) {
+    var pts = framePoints(f.ball, f.cars, true);
+    if (t !== undefined) {
+      for (var j = frameAt(t); j < T.frames.length; j++) {
+        var row = T.frames[j];
+        if (row[0] <= t) continue;
+        if (row[0] > t + LOOKAHEAD) break;
+        pts = pts.concat(framePoints([row[1], row[2], row[3]],
+                                     rawCars(row), false));
+      }
     }
     var xs = pts.map(function (p) { return p[0]; });
     var ys = pts.map(function (p) { return p[1]; });
@@ -489,15 +556,35 @@ VIEWER_JS = r"""
     // linear in distance. Binary search instead: ~18 cheap iterations a frame,
     // and correct by construction rather than by an approximation I would then
     // have to trust.
+    // Height matters. Every box corner used to be tested at z=0, so a ball
+    // at 1800 uu -- an ordinary aerial, the ceiling is 2044 -- projected well
+    // above every point the fit checked and left the top of the frame at
+    // exactly the moment worth watching. The top corners are tested at the
+    // highest thing in shot.
+    var topZ = 0;
+    for (var q = 0; q < pts.length; q++) topZ = Math.max(topZ, pts[q][2] || 0);
     var pad = 1300;
-    var box = [[minX - pad, minY - pad], [maxX + pad, minY - pad],
-               [minX - pad, maxY + pad], [maxX + pad, maxY + pad]];
+    var box = [[minX - pad, minY - pad, 0], [maxX + pad, minY - pad, 0],
+               [minX - pad, maxY + pad, 0], [maxX + pad, maxY + pad, 0],
+               [minX - pad, minY - pad, topZ], [maxX + pad, minY - pad, topZ],
+               [minX - pad, maxY + pad, topZ], [maxX + pad, maxY + pad, topZ]];
     var lo = MIN_D, hi = MAX_D;
     for (var it = 0; it < 18; it++) {
       var mid = (lo + hi) / 2;
       if (fitsAt(box, want.x, want.y, mid)) hi = mid; else lo = mid;
     }
     want.d = hi;
+
+    // A kickoff reset, or your car respawning on the far side after a demo,
+    // moves the target thousands of units in a single frame. Easing across
+    // that sweeps the camera over the whole pitch for about a second, which
+    // reads as the replay lurching about on its own. A scene change should be
+    // a CUT. Smoothing is for motion, not for teleports.
+    if (lastWant) {
+      var moved = Math.hypot(want.x - lastWant.x, want.y - lastWant.y);
+      if (moved > 2500 || Math.abs(want.d - lastWant.d) > 3000) snapNext = true;
+    }
+    lastWant = {x: want.x, y: want.y, d: want.d};
   }
 
   function projectFrom(x, y, z, ox, oy, d) {
@@ -514,7 +601,7 @@ VIEWER_JS = r"""
 
   function fitsAt(box, ox, oy, d) {
     for (var k = 0; k < box.length; k++) {
-      var q = projectFrom(box[k][0], box[k][1], 0, ox, oy, d);
+      var q = projectFrom(box[k][0], box[k][1], box[k][2] || 0, ox, oy, d);
       if (!q) return false;
       if (q.x < 4 || q.x > cv.width - 4 || q.y < 4 || q.y > cv.height - 4)
         return false;
@@ -597,15 +684,24 @@ VIEWER_JS = r"""
       var o = 4 + c * STRIDE;
       // A car absent from a frame is stored as zeros; interpolating toward
       // that would slide it to the centre spot instead of leaving it be.
-      var aOff = (A[o] === 0 && A[o + 1] === 0);
-      var bOff = (B[o] === 0 && B[o + 1] === 0);
+      // null means "not in this frame". Testing x===0&&y===0 instead treated
+      // a car on the centre spot as missing -- it vanished for that interval,
+      // or froze when only one of the two bracketing frames matched.
+      var aOff = A[o] === null;
+      var bOff = B[o] === null;
       if (aOff && bOff) { out.cars.push(null); continue; }
       var src = aOff ? B : A, dst = bOff ? A : B, uu = (aOff || bOff) ? 0 : u;
       out.cars.push([
         src[o] + (dst[o] - src[o]) * uu,
         src[o + 1] + (dst[o + 1] - src[o + 1]) * uu,
         src[o + 2] + (dst[o + 2] - src[o + 2]) * uu,
-        lerpAngle(src[o + 3], dst[o + 3], uu)
+        lerpAngle(src[o + 3], dst[o + 3], uu),
+        // boost and speed lerp; flags and steer are taken from the nearer
+        // frame, because a bitfield has no meaningful midpoint.
+        src[o + 4] + (dst[o + 4] - src[o + 4]) * uu,
+        src[o + 5] + (dst[o + 5] - src[o + 5]) * uu,
+        (uu < 0.5 ? src : dst)[o + 6],
+        (uu < 0.5 ? src : dst)[o + 7]
       ]);
     }
     return out;
@@ -623,9 +719,26 @@ VIEWER_JS = r"""
         ctx.fill(); ctx.globalAlpha = 1;
       }
     }
+    // Screen rotation from a PROJECTED nose point, not from the heading
+    // scaled by a constant.
+    //
+    // The old form was `rotate(-(head * PI/180) * flip * 0.55)`, where 0.55
+    // faked the foreshortening of a tilted camera. Two faults. It is not
+    // periodic: a car driving along -x has its heading flip between 179 and
+    // -179 frame to frame, and 0.55 turns that 2-degree wobble into a
+    // 198-degree snap on screen -- cars visibly spinning on the spot. And the
+    // `flip` negation MIRRORS the angle rather than rotating it 180, so on
+    // replays where you played the far side, cars pointed the wrong way.
+    //
+    // Projecting a point 120 uu ahead of the car and taking the screen angle
+    // to it is exact, inherently periodic, and gets the flip and the
+    // perspective squash for free from project() itself.
+    var rad = head * Math.PI / 180;
+    var nose = project(x + Math.cos(rad) * 120, y + Math.sin(rad) * 120, z + 17);
+    var ang = nose ? Math.atan2(nose.y - p.y, nose.x - p.x) : 0;
     ctx.save();
     ctx.translate(p.x, p.y);
-    ctx.rotate(-(head * Math.PI / 180) * flip * 0.55);
+    ctx.rotate(ang);
     ctx.fillStyle = col;
     ctx.globalAlpha = 0.95;
     ctx.beginPath();
@@ -648,8 +761,8 @@ VIEWER_JS = r"""
       ctx.stroke();
     }
     ctx.fillStyle = me ? css('--ink') : css('--ink-3');
-    if (me) ctx.font = 'bold 12px ui-monospace, monospace';
-    ctx.font = '11px ui-monospace, monospace';
+    ctx.font = me ? 'bold 12px ui-monospace, monospace'
+                  : '11px ui-monospace, monospace';
     ctx.fillText(name.slice(0, 12), p.x + len * 0.7, p.y - wid * 0.6);
   }
 
@@ -756,9 +869,54 @@ VIEWER_JS = r"""
     if (!r) { live.hidden = true; return; }
     live.hidden = false;
     live.className = 'live sev' + r.sev;
+    // Notes interpolate team-mate and opponent names straight from the
+    // replay, so they are escaped here for the same reason as the caption.
     live.innerHTML = r.notes.map(function (n, k) {
-      return k === 0 ? '<b>' + n + '</b>' : '<span>' + n + '</span>';
+      return k === 0 ? '<b>' + esc(n) + '</b>' : '<span>' + esc(n) + '</span>';
     }).join('');
+  }
+
+  var F_AIR = 1, F_UPRIGHT = 2, F_BALLCAM = 4, F_SUPER = 8, F_SLIDE = 16;
+
+  // Everything the replay knows about your car at this instant, laid out.
+  // All of it was already in the file; none of it was being read.
+  function paintState(f) {
+    if (!state) return;
+    var me = f.cars[T.me];
+    if (!me) { state.hidden = true; return; }
+    state.hidden = false;
+    var fl = me[6] | 0;
+    var vAng = lastPos ? Math.atan2(me[1] - lastPos[1], me[0] - lastPos[0])
+                         * 180 / Math.PI : null;
+    var facing = me[3];
+    // How far the nose is from the direction of travel. Large means drifting,
+    // reversing, or mid-recovery -- the thing "homeward movement" cannot see.
+    var off = (vAng === null || me[5] < 250) ? null
+              : Math.abs(((facing - vAng + 540) % 360) - 180);
+    lastPos = [me[0], me[1]];
+
+    function cell(k, v, tone) {
+      return '<div><span class="k">' + k + '</span><span class="v"'
+             + (tone ? ' style="color:' + tone + '"' : '') + '>' + v
+             + '</span></div>';
+    }
+    var air = (fl & F_AIR) ? (me[2] > 300 ? 'airborne' : 'off ground')
+                           : 'grounded';
+    state.innerHTML =
+      cell('speed', Math.round(me[5]) + ' uu/s',
+           (fl & F_SUPER) ? css('--accent') : '') +
+      cell('boost', Math.round(me[4]),
+           me[4] < 15 ? css('--bad') : '') +
+      cell('height', Math.round(me[2]) + ' uu') +
+      cell('state', air) +
+      cell('wheels', (fl & F_UPRIGHT) ? 'upright' : 'not upright',
+           (fl & F_UPRIGHT) ? '' : css('--bad')) +
+      cell('ball cam', (fl & F_BALLCAM) ? 'on' : 'off',
+           (fl & F_BALLCAM) ? '' : css('--warn')) +
+      cell('steer', (me[7] > 12 ? 'right' : me[7] < -12 ? 'left' : 'straight')
+                    + ((fl & F_SLIDE) ? ' + slide' : '')) +
+      cell('nose vs travel', off === null ? '--' : Math.round(off) + '°',
+           off !== null && off > 90 ? css('--bad') : '');
   }
 
   function drawOverlay(f) {
@@ -780,6 +938,11 @@ VIEWER_JS = r"""
     }
 
     if (goalSide) return;
+    // Declared BEFORE first use. This sat below the usable check once, and
+    // var-hoisting made SH undefined there: every frame where the player was
+    // not goal-side threw, which killed draw() after the pitch and before the
+    // cars -- the whole lobby and the ball simply vanished from the viewer.
+    var SH = T.shadow || {};
     // No 'be here' marker unless the measurement actually separates holding
     // from conceding. In 2v2 it does not (0.35 vs 0.36), so drawing one there
     // would be decoration dressed as advice.
@@ -802,7 +965,6 @@ VIEWER_JS = r"""
     //
     // Correlational, not causal: a deeper defender may partly reflect a less
     // dangerous attack. It is still this player's own record of what held.
-    var SH = T.shadow || {};
     var SHADOW_DEPTH = SH.depth || 0.23, SHADOW_LATERAL = SH.lateral || 0.35;
     var sx = f.ball[0] * SHADOW_LATERAL;
     var sy = ownY + (f.ball[1] - ownY) * SHADOW_DEPTH;
@@ -837,12 +999,28 @@ VIEWER_JS = r"""
     }
   }
 
+  var lastDraw = 0;
   function draw(t) {
     var f = sample(t);
-    planCamera(f);
-    cam.x += (want.x - cam.x) * FOLLOW;
-    cam.y += (want.y - cam.y) * FOLLOW;
-    cam.d += (want.d - cam.d) * FOLLOW;
+    planCamera(f, t);
+
+    // Smoothing per unit TIME, not per frame. `cam += (want-cam) * 0.08` once
+    // a frame means the camera behaves differently at 30 and 144 fps, and
+    // differently again when the browser drops frames.
+    var now = (window.performance || Date).now();
+    var dt = lastDraw ? Math.min((now - lastDraw) / 1000, 0.25) : 0;
+    lastDraw = now;
+    var k = snapNext ? 1 : 1 - Math.pow(1 - FOLLOW, dt * 60);
+
+    // Symmetric easing. Snapping outward the moment the box grows was the
+    // first attempt, and it applied the very jumps this is meant to hide --
+    // an 8000-unit step in one frame. What makes easing safe instead is the
+    // lookahead above: the target already covers the next 1.2s, and the ease
+    // settles in about 1s, so the play is in shot before it arrives.
+    cam.x += (want.x - cam.x) * k;
+    cam.y += (want.y - cam.y) * k;
+    cam.d += (want.d - cam.d) * k;
+    snapNext = false;
     ctx.clearRect(0, 0, cv.width, cv.height);
     drawPitch();
     drawOverlay(f);
@@ -885,6 +1063,7 @@ VIEWER_JS = r"""
       }
     });
 
+    paintState(f);
     var read = readFrame(f, prevBall);
     prevBall = f.ball.slice();
     paintLive(read);
@@ -904,11 +1083,12 @@ VIEWER_JS = r"""
 
   function seekTime(t, snap) {
     cursor = Math.max(T0, Math.min(T1, t));
-    if (snap !== false) {
-      // Jumping to a moment should cut, not glide the camera across the pitch.
-      planCamera(sample(cursor));
-      cam.x = want.x; cam.y = want.y; cam.d = want.d;
-    }
+    // The live read derives ball direction from the previous drawn frame.
+    // Across a jump that difference is a teleport, not a velocity, so it
+    // reported the ball screaming toward your net at the landing frame.
+    prevBall = null;
+    // Jumping to a moment should cut, not glide the camera across the pitch.
+    if (snap !== false) snapNext = true;
     draw(cursor);
   }
 
@@ -923,6 +1103,10 @@ VIEWER_JS = r"""
   // and the skip is computed from that same moment. It is then structurally
   // impossible to jump past one.
   var SLOW = T.slow || 6, EPS = 0.15;
+  // Seconds of run-up played at NORMAL speed before each moment. A conceded
+  // goal's marker already sits 4s before the ball crosses the line, so this
+  // shows about ten seconds of the move that created it.
+  var LEAD_IN = 6.0;
   function pendingMoment(t) {
     for (var k = 0; k < T.moments.length; k++) {
       if (T.moments[k].t + SLOW > t) return T.moments[k];
@@ -933,11 +1117,21 @@ VIEWER_JS = r"""
     var m = pendingMoment(t);
     return (m && t >= m.t - EPS) ? m : null;
   }
+  // Player names reach these panels verbatim. They are JSON-escaped on the
+  // way into the page, which is not HTML escaping -- and the moment buttons'
+  // build-time esc() is undone by reading them back through dataset, which
+  // returns the decoded string. So escape at the sink, where every path
+  // converges.
+  function esc(t) {
+    return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function setCaption(m) {
     if (!m) { caption.hidden = true; return; }
     caption.hidden = false;
     caption.className = 'caption ' + m.kind;
-    caption.innerHTML = '<b>' + m.title + '</b>' + m.text;
+    caption.innerHTML = '<b>' + esc(m.title) + '</b>' + esc(m.text);
   }
 
   // Time-based, not frame-based: rAF gives ~60 fps regardless of the data
@@ -949,11 +1143,28 @@ VIEWER_JS = r"""
 
     if (guided) {
       var m = momentAt(cursor);
-      if (m) { rate = 0.25; setCaption(m); }
-      else {
+      var nm = pendingMoment(cursor);
+      if (m) {
+        rate = 0.25; setCaption(m);
+      } else if (nm && nm.t - cursor <= LEAD_IN) {
+        // THE BUILD-UP. This used to be fast-forwarded at 4x along with the
+        // dead time -- it jumped to 1.5s before the marker and covered even
+        // that at quadruple speed, so a guided run cut from nothing straight
+        // into the mistake and you never saw the play that produced it. The
+        // run-up is the part worth watching, so it runs at normal speed.
+        rate = 1;
+        setCaption({kind: nm.kind, title: 'Building up to: ' + nm.title,
+                    text: 'Watch what creates this — slows down in '
+                          + Math.max(0, nm.t - cursor).toFixed(1) + 's.'});
+      } else {
         rate = 4; setCaption(null);
-        var nm = pendingMoment(cursor);
-        if (nm && nm.t - cursor > 3) cursor = nm.t - 1.5;
+        // Skipping dead time teleports the cursor across the pitch. Without
+        // this the camera then GLIDES to the new position over ~a second,
+        // sweeping past everything in between -- which looks like the replay
+        // lurching about on its own. A jump in time should be a cut.
+        if (nm && nm.t - cursor > LEAD_IN) {
+          cursor = nm.t - LEAD_IN; snapNext = true; prevBall = null;
+        }
       }
     }
 
@@ -975,17 +1186,36 @@ VIEWER_JS = r"""
     guide.textContent = 'Resume run-through';
   }
   function stop() {
-    playing = false; guided = false; rate = 1;
+    playing = false; guided = false; rate = userRate;
     if (raf) cancelAnimationFrame(raf);
     raf = null;
     play.textContent = 'Play';
     guide.textContent = 'Guided run-through';
     setCaption(null);
+    prevBall = null;
   }
+
+  // Guided mode drives `rate` itself (0.25x on a moment, 4x over dead time),
+  // so the chosen speed is kept separately and restored when guided ends.
+  var rateBtns = [].slice.call(document.querySelectorAll('#rates button'));
+  rateBtns.forEach(function (b) {
+    b.addEventListener('click', function () {
+      userRate = parseFloat(b.dataset.rate);
+      if (!guided) rate = userRate;
+      rateBtns.forEach(function (o) {
+        o.className = (o === b) ? 'on' : '';
+      });
+      draw(cursor);
+    });
+  });
 
   play.addEventListener('click', function () {
     if (playing && !guided) { stop(); return; }
     stop();
+    // At the end of the match the cursor sits on T1, so the loop stopped
+    // again on its first tick and the button just flickered. Rewind.
+    if (cursor >= T1 - 0.05) { cursor = T0; snapNext = true; }
+    rate = userRate;
     play.textContent = 'Pause';
     start();
   });
@@ -996,8 +1226,14 @@ VIEWER_JS = r"""
     }
     stop();
     guided = true; rate = 4;
+    play.textContent = 'Pause';   // it IS playing; the label said 'Play'
+    // Reset, or the previous run's value keeps suppressing the severity-2
+    // auto-pause: the `t - pausedAt > 8` guard is meant to stop the same
+    // incident pausing twice, and a stale value silently disarmed it for the
+    // whole of every run after the first.
+    pausedAt = -99;
     guide.textContent = 'Stop';
-    if (T.moments.length) cursor = Math.max(T0, T.moments[0].t - 1.5);
+    if (T.moments.length) cursor = Math.max(T0, T.moments[0].t - LEAD_IN);
     start();
   });
 
@@ -1178,6 +1414,20 @@ def rank_block(rank):
     if not pls:
         return ""
     main = next((p for p in pls if p.get("main")), pls[0])
+
+    # Say how old this is, and how it got here. Rocket League USED to write
+    # "Post-divide PartyLeaderMMR" into Launch.log and this updated itself
+    # from that; the game no longer logs MMR at all -- zero such lines in any
+    # current log -- so the numbers are only as fresh as the last time they
+    # were entered. A stale rank presented as current is worse than no rank.
+    stamp = rank.get("updated") or rank.get("as_of")
+    stale = ('<p style="color:var(--warn);font-size:.8rem;max-width:66ch">'
+             "These figures are entered by hand and were last set %s. Rocket "
+             "League stopped writing MMR to its log, so nothing can refresh "
+             "them automatically &mdash; run "
+             "<code>python coach/watch.py --set-mmr 994 --set-rank "
+             "&quot;Diamond III Div I&quot;</code> to correct them.</p>"
+             % (("on <b>%s</b>" % stamp) if stamp else "at some point"))
     gap = None
     if main.get("season_peak") and main.get("mmr"):
         gap = main["season_peak"] - main["mmr"]
@@ -1270,6 +1520,7 @@ def rank_block(rank):
                  % (esc(pl.get("name", "")), esc(pl.get("rank", "")),
                     pl.get("mmr") or "-", sub))
     o.append("</table></div>")
+    o.append(stale)
     return "\n".join(o)
 
 
@@ -1295,12 +1546,20 @@ def shadow_note(track):
     else:
         bits.append(
             "How <i>deep</i> you sit turns out not to predict the outcome: "
-            "%.0f%% held against %.0f%% conceded, a gap of %.2f. An earlier "
-            "run on a quarter of this data showed 0.10 and looked like the "
-            "finding &mdash; it did not survive the bigger sample, so the "
-            "marker no longer claims it. What still separates is where you "
-            "sit <i>across</i> the pitch: %.0f%% of the ball's offset when "
-            "holding, %.0f%% when conceding."
+            "%.0f%% held against %.0f%% conceded, a gap of only %.2f. An "
+            "earlier run on a quarter of this data showed 0.10 and looked "
+            "like the finding &mdash; it did not survive the bigger sample, "
+            "so the marker no longer claims it. What does separate is where "
+            "you sit <i>across</i> the pitch: %.0f%% of the ball&rsquo;s "
+            "offset when holding, %.0f%% when conceding.<br><br>"
+            "<span style='color:var(--ink-3)'>Two corrections are baked "
+            "into those numbers. The measurement originally pooled "
+            "<i>both</i> teams, so figures labelled &ldquo;you&rdquo; "
+            "included every opponent in your own lobbies; it is now "
+            "restricted to your side. And the sideways gap was re-tested at "
+            "20, 40, 60, 80 and 134 matches &mdash; it lands between 0.15 "
+            "and 0.17 at every one of them, which is why it is still here "
+            "and the depth number is not.</span>"
             % (100 * sh["depth"], 100 * sh.get("depth_conceded", 0),
                sh.get("separation", 0), 100 * (sh.get("lateral") or 0),
                100 * (sh.get("lateral_conceded") or 0)))
@@ -1582,28 +1841,199 @@ def build(payload, refresh=0) -> str:
 
     a("</div>")
 
+    # Kickoff "cheating" and named mechanics, summed over every match. Both
+    # are season-scale questions -- one match has about seven kickoffs and a
+    # handful of carries, which is far too few to say anything.
+    ck = {"cheat_n": 0, "cheat_won": 0, "back_n": 0, "back_won": 0}
+    tq, tq_live, tq_sec = {}, 0.0, {}
+    for m in matches:
+        kd = sec(m, "kickoffs")
+        for key in ck:
+            ck[key] += kd.get(key, 0) or 0
+        td = sec(m, "techniques")
+        for key, v in (td.get("counts") or {}).items():
+            tq[key] = tq.get(key, 0) + v
+        for key, v in (td.get("seconds") or {}).items():
+            tq_sec[key] = tq_sec.get(key, 0.0) + v
+        tq_live += td.get("live", 0.0) or 0.0
+
+    if ck["cheat_n"] >= 40 and ck["back_n"] >= 40:
+        cw = 100.0 * ck["cheat_won"] / ck["cheat_n"]
+        bw = 100.0 * ck["back_won"] / ck["back_n"]
+        se = math.sqrt(max((cw/100)*(1-cw/100)/ck["cheat_n"]
+                           + (bw/100)*(1-bw/100)/ck["back_n"], 1e-12)) * 100
+        a('<div class="sect"><h2>Cheating up on kickoffs</h2></div>')
+        a('<div class="card">')
+        a("<p>When your second man cheats up you win the kickoff "
+          "<b>%.0f%%</b> of the time (%d kickoffs). When they hang back, "
+          "<b>%.0f%%</b> (%d).</p>" % (cw, ck["cheat_n"], bw, ck["back_n"]))
+        if (bw - cw) > 2.0 * se:
+            a('<p style="color:var(--ink-2)">That gap is real at this sample '
+              "size. Cheating is not the fault in itself &mdash; across 1,882 "
+              "Grand Champion kickoffs it makes no difference at all, 50% "
+              "either way. It is costing <i>you</i> kickoffs, which usually "
+              "means the cheat sits close enough to be caught by the 50/50 "
+              "rather than where the loose ball actually lands.</p>")
+        else:
+            a('<p style="color:var(--ink-3)">The difference is inside the '
+              "noise for this many kickoffs, so it is reported rather than "
+              "acted on.</p>")
+        a('<p style="color:var(--ink-3);font-size:.78rem">Kickoffs are found '
+          "from the game's own ball-has-been-hit flag, not guessed from a "
+          "ball sitting near the centre spot. Won means the ball is in their "
+          "half three seconds later.</p>")
+        a("</div>")
+
+    if tq_live > 600 and tq:
+        a('<div class="sect"><h2>Named mechanics</h2></div>')
+        a('<div class="card scroll"><table>')
+        a("<tr><td><b>technique</b></td><td><b>total &middot; per 10 min"
+          "</b></td></tr>")
+        for key, label in (("carry", "carries"), ("flick", "flicks"),
+                           ("air_dribble", "air dribbles"),
+                           ("wave_dash", "wave dashes"),
+                           ("half_flip", "half-flips"),
+                           ("flip_reset", "flip resets"),
+                           ("pinch", "pinches"), ("bump", "bumps")):
+            n = tq.get(key, 0)
+            a("<tr><td>%s</td><td>%d &middot; %.1f</td></tr>"
+              % (label, n, n * 600.0 / tq_live))
+        for key, label in (("wall", "time up a wall"),
+                           ("ceiling", "time on the ceiling"),
+                           ("air_roll", "time air rolling")):
+            v = tq_sec.get(key, 0.0)
+            a("<tr><td>%s</td><td>%.0f s &middot; %.1f%%</td></tr>"
+              % (label, v, 100.0 * v / tq_live))
+        a("</table></div>")
+        a('<p style="color:var(--ink-3);font-size:.78rem;max-width:70ch">'
+          "Replay frames arrive at roughly 10-30 Hz, which is enough for "
+          "anything defined by where a car is over a few tenths of a second "
+          "and not enough for anything defined by its attitude at the instant "
+          "of a touch. Musty flicks, tornado spins and stalls are therefore "
+          "<i>not</i> counted here rather than counted badly.</p>")
+
     a("</div>")   # end overview panel
 
     a('<div class="panel" data-panel="lobby" hidden>')
     lob = sec(latest, "lobby")
     if lob.get("players"):
+        clash = lob.get("clashes") or []
+        if clash:
+            a('<div class="sect"><h2>Where your team pulled against itself</h2>'
+              "</div>")
+            a('<div class="card" style="border-left:3px solid var(--orange)">')
+            for c in clash:
+                a('<p style="margin:.35rem 0;color:var(--ink-1)">%s</p>'
+                  % esc(c))
+            a('<p style="color:var(--ink-3);font-size:.78rem;margin-top:.6rem;'
+              'max-width:70ch">'
+              "Same-team only &mdash; two opponents with the same habit is "
+              "their problem, not a rotation you can fix. Measured frame by "
+              "frame rather than from season averages: two team-mates "
+              "rotating properly both <i>average</i> mid-pitch, so an "
+              "average-similarity test flags textbook rotation as a fault. "
+              "Across your 3v3 matches both-players-ahead runs 10.4% in wins "
+              "against 15.6% in losses; on 380 team-observations from "
+              "downloaded Grand Champion replays it runs 11.4% against "
+              "14.8%. Same direction on both, modest effect, small sample "
+              "&mdash; treat it as a nudge, not a verdict.</p>")
+            a("</div>")
+
+        # Say WHICH match. Without the date this reads as "your most recent
+        # game", and if the newest saved replay is older than the game you
+        # just played -- easy, since a replay only exists if you saved it --
+        # the tab looks stale when it is simply showing the newest replay
+        # that exists.
         a('<div class="sect"><h2>Everyone in your last match</h2></div>')
-        a('<div class="card scroll"><table>')
-        a("<tr><td><b>player</b></td><td><b>score &middot; speed &middot; "
-          "first-ball &middot; boost &middot; air &middot; demos</b></td></tr>")
-        order = sorted(lob["players"].items(), key=lambda kv: -kv[1].get("score", 0))
+        a('<p style="color:var(--ink-3);font-size:.82rem;margin-top:-6px">'
+          "Newest replay on disk: <b>%s</b>%s. Matches played since then only "
+          "appear once you save a replay for them.</p>"
+          % (esc(latest.get("date") or "unknown"),
+             (" &middot; %dv%d" % (latest.get("team_size") or 0,
+                                   latest.get("team_size") or 0))
+             if latest.get("team_size") else ""))
+        order = sorted(lob["players"].items(),
+                       key=lambda kv: -kv[1].get("score", 0))
+        a('<div class="cards">')
         for nm, pl in order:
             side = ("you" if nm == lob.get("me")
                     else "mate" if pl.get("mine") else "opponent")
             col = ("var(--accent)" if side == "you"
                    else "var(--blue)" if side == "mate" else "var(--orange)")
-            a('<tr><td><span style="color:%s">%s</span> %s</td>'
-              "<td>%d &middot; %.0f &middot; %.1f%% &middot; %.0f &middot; "
-              "%.1f%% &middot; %d</td></tr>"
-              % (col, esc(side), esc(nm), pl.get("score", 0), pl.get("speed", 0),
+            a('<div class="card" style="border-left:3px solid %s">' % col)
+            a('<div style="display:flex;justify-content:space-between;'
+              'align-items:baseline;gap:.5rem">'
+              '<b style="font-size:1.02rem">%s</b>'
+              '<span style="color:%s;font-size:.72rem;letter-spacing:.08em;'
+              'text-transform:uppercase">%s</span></div>'
+              % (esc(nm), col, esc(side)))
+            a('<p style="color:var(--ink-2);margin:.3rem 0 .5rem">%s</p>'
+              % esc(pl.get("read") or ""))
+            a('<div style="color:var(--ink-3);font-size:.78rem;'
+              'line-height:1.7">'
+              "score %d &middot; %.0f uu/s &middot; %.1f%% first to ball"
+              "<br>%.0f boost held &middot; %.1f%% starved &middot; "
+              "%.1f%% air &middot; %d demos</div>"
+              % (pl.get("score", 0), pl.get("speed", 0),
                  pl.get("first_man", 0), pl.get("boost_held", 0),
-                 pl.get("airborne", 0), pl.get("demos", 0)))
-        a("</table></div>")
+                 pl.get("starved", 0), pl.get("airborne", 0),
+                 pl.get("demos", 0)))
+            if pl.get("exposed") is not None:
+                exp, com = pl.get("exposed", 0.0), pl.get("committed", 0.0)
+                a('<div style="display:flex;gap:14px;margin-top:.4rem;'
+                  'font-size:.78rem">'
+                  '<span><span style="color:var(--bad)">%.0f%%</span>'
+                  '<span style="color:var(--ink-3)"> exposed</span></span>'
+                  '<span><span style="color:var(--good)">%.0f%%</span>'
+                  '<span style="color:var(--ink-3)"> attacking</span></span>'
+                  "</div>" % (exp, com))
+            if pl.get("improve"):
+                a('<p style="margin:.6rem 0 0;padding-top:.5rem;'
+                  'border-top:1px solid var(--line);font-size:.82rem">'
+                  '<span style="color:var(--ink-3)">biggest fix &mdash; </span>'
+                  "%s</p>" % esc(pl["improve"]))
+            a("</div>")
+        a("</div>")
+        a('<div class="card" style="border-left:3px solid var(--accent)">')
+        a("<p><b>Ahead of the ball is two different things.</b> "
+          "<span style='color:var(--bad)'>Exposed</span> is the share of "
+          "the match a player spent ahead of the ball while the <i>other</i> "
+          "team touched it last in this half. "
+          "<span style='color:var(--good)'>Attacking</span> is the same "
+          "position during their own team&rsquo;s possession.</p>")
+        a('<p style="color:var(--ink-2);font-size:.86rem">'
+          "The distinction is not cosmetic. Measured on 30 Champion 3v3 "
+          "matches, a frame where a player is ahead of the ball is "
+          "1.7&times; the normal chance of conceding within six seconds "
+          "&mdash; but split them and being ahead during your own attack is "
+          "<b>0.4&times;</b>, <i>safer</i> than an average frame, while "
+          "being ahead once they have it is <b>2.8&times;</b>. On 683,000 "
+          "frames of downloaded Grand Champion play the same split gives "
+          "<b>0.33&times;</b> and <b>2.93&times;</b> &mdash; a different "
+          "population, different players, same answer. Average up-pitch "
+          "cannot see any of it: in one measured lobby a player sat 1,000 uu "
+          "further forward than another and was exposed 2.7% of the time "
+          "against their 26.8%.</p>")
+        a('<p style="color:var(--ink-3);font-size:.78rem">'
+          "Those two ratios are reference figures from the matches this was "
+          "built on, not from your own record &mdash; the per-player "
+          "percentages above <i>are</i> yours. The labels are cut at "
+          "percentiles of Champion 3v3 lobbies, so if you play at a "
+          "noticeably different rank expect them to fire more or less "
+          "often than one player in ten.</p>")
+        a('<p style="color:var(--ink-3);font-size:.78rem">'
+          "It comes from <code>HitTeamNum</code>, which names the team that "
+          "touched the ball last and was already in every replay &mdash; the "
+          "positional metrics simply were not reading it. It is a proxy for "
+          "intent, not a reading of it: you can be ahead of the ball during "
+          "your own possession and still be badly placed.</p>")
+        a("</div>")
+        a('<p style="color:var(--ink-3);font-size:.78rem;max-width:70ch">'
+          "Every player is measured by the same code on the same axes, "
+          "opponents included &mdash; they are at your rank by definition, so "
+          "what separates the best of them from you is a habit at exactly the "
+          "level you are trying to leave. One fix each: a list of six faults "
+          "per player is a scoreboard, not coaching.</p>")
         for ln in ((latest.get("sections", {}).get("lobby") or {}).get("lines") or []):
             if "top of the lobby" in ln:
                 a('<p style="color:var(--ink-2);max-width:70ch">%s</p>' % esc(ln.strip()))
@@ -1630,9 +2060,15 @@ def build(payload, refresh=0) -> str:
         a('<div class="ctrl">'
           '<button id="guide" type="button">Guided run-through</button>'
           '<button id="play" type="button" class="ghost">Play</button>'
+          '<span class="rates" id="rates">'
+          + "".join('<button type="button" data-rate="%s"%s>%sx</button>'
+                    % (r, ' class="on"' if r == "1" else "", r)
+                    for r in ("0.25", "0.5", "1", "2", "3"))
+          + '</span>'
           '<input id="scrub" type="range" min="0" value="0" '
           'aria-label="scrub the replay">'
           '<span class="clock" id="clock">0.0s</span></div>')
+        a('<div class="state" id="state" hidden></div>')
         a('<div class="live" id="live" hidden></div>')
         a('<div class="caption" id="caption" hidden></div>')
         a('<div class="legend">'
@@ -1661,7 +2097,17 @@ def build(payload, refresh=0) -> str:
                  int(mo["t"] // 60), int(mo["t"] % 60),
                  esc(mo.get("title") or mo["text"])))
         a("</div></div></div>")
-        a("<script>window.__TRACK__=%s;</script>" % json.dumps(track))
+        # Escape the HTML-significant characters. These are valid JSON string
+        # escapes -- the parsed value is byte-identical -- but the HTML
+        # tokenizer never sees a literal "</script" or "<!--". Player names
+        # come from other people's Steam profiles, which allow arbitrary
+        # characters, and land here verbatim; a name containing "</script>"
+        # would close this tag, leave an unterminated string, and blank the
+        # whole replay tab while the rest of the JSON was parsed as markup.
+        a("<script>window.__TRACK__=%s;</script>"
+          % json.dumps(track).replace("<", "\u003c")
+                             .replace(">", "\u003e")
+                             .replace("&", "\u0026"))
     else:
         a('<p style="color:var(--ink-3)">No replay track for the latest match.</p>')
     a("</div>")   # end replay panel

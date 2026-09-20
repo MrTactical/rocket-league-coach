@@ -31,6 +31,7 @@ from ..learn.experience import ExperienceTable, OutcomeWatcher, situation_key
 from .challenge import CHALLENGE, SHADOW, STRIKE, ContestState
 from . import boost as boost_mod
 from . import kickoff as kickoff_mod
+from . import roles
 from .roles import (
     ATTACK,
     DEFEND,
@@ -133,6 +134,21 @@ def car_of(state):
 
 
 class Brain:
+    def _measured_first_man_rel(self):
+        """
+        The modelled player's first-to-ball share, or None for a preset.
+
+        Cached on first use: it is read every tick and the lookup walks two
+        dicts. None means no measured profile is loaded, in which case the
+        module constants stand unchanged.
+        """
+        if self._first_man_rel is None:
+            prof = getattr(self.hz, "profile", None)
+            rot = (getattr(prof, "measured", None) or {}).get("rotation") or {}
+            val = rot.get("first_man_rel")
+            self._first_man_rel = float(val) if val else False
+        return self._first_man_rel or None
+
     def __init__(self, model, humanizer, config=None):
         self.model = model
         self.hz = humanizer
@@ -149,6 +165,15 @@ class Brain:
         # something nobody chose. That was the real cause of the role thrash.
         self.active_role = SUPPORT
         self.recovery = Recovery()
+        self._first_man_rel = None
+
+        # Hand the rotation block to the positioning layer. Done here rather
+        # than in ally.py so a Brain built in a test gets it too.
+        prof = getattr(humanizer, "profile", None)
+        rot = (getattr(prof, "measured", None) or {}).get("rotation") or {}
+        if rot:
+            roles.set_measured(rot)
+        self._exposed_pct = rot.get("exposed_pct")
         self.strike: Strike | None = None
         self.maneuver = None
         self.kickoff_plan: kickoff_mod.KickoffPlan | None = None
@@ -369,6 +394,30 @@ class Brain:
                 # role flicker every time it jitters across the line. The
                 # deeper player commits to defending sooner.
                 enter = COVER_ENTER - COVER_ORDINAL_STEP * min(ordinal - 1, 1)
+                # Scale by how often the modelled player ACTUALLY goes for the
+                # ball. This is the difference between a bot that plays like
+                # the person and one that merely misses like them: execution
+                # noise was measured from the start, but where the car goes was
+                # not, and that is most of what "plays like me" means.
+                #
+                # first_man_rel is their share of first-to-ball against an even
+                # split. Below 1.0 means they defer, so the cover role should
+                # trigger sooner -- a lower threshold. Clamped so an extreme
+                # profile cannot produce a bot that never leaves its net or
+                # never comes back.
+                rel = self._measured_first_man_rel()
+                if rel is not None:
+                    enter = max(0.10, min(0.45, enter * rel))
+                # A player who is often caught ahead of the ball while the
+                # opponent has it should produce a bot that does the same --
+                # a HIGHER bar to start covering, so it stays forward longer
+                # and gets punished for it. The point of a practice partner is
+                # to reproduce the mistake, not to fix it silently.
+                if self._exposed_pct:
+                    from .roles import POP_EXPOSED
+                    ratio = self._exposed_pct / POP_EXPOSED
+                    enter = max(0.10, min(0.45,
+                                          enter * max(0.75, min(1.35, ratio))))
                 leave = enter - COVER_BAND
                 want_defend = self._second_man_defending
                 if self._second_man_defending:

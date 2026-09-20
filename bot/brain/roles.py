@@ -48,6 +48,29 @@ class RoleState:
         return now - self.since
 
 
+# Measured tendencies for the modelled player, or empty for a rank preset.
+#
+# Module-level because support_position() is a free function called from
+# several places and threading a parameter through all of them would touch far
+# more code than the feature is worth. Safe here: RLBot runs each Ally as its
+# own process, so this is per-bot state despite looking global. If Allies ever
+# share a process as a hivemind, this has to move onto the Brain.
+_MEASURED = {}
+
+# Population medians over 1008 player-observations from 168 Champion 3v3
+# lobbies, so a measurement is expressed relative to peers rather than as an
+# absolute nobody agrees on.
+POP_UP_PITCH = 4023.8
+POP_COMMITTED = 7.0
+POP_EXPOSED = 10.9
+
+
+def set_measured(d):
+    """Install the measured rotation block. Called once, at bot startup."""
+    global _MEASURED
+    _MEASURED = dict(d or {})
+
+
 def _depth(state, car) -> float:
     """How deep in our own half a car is: +BACK_WALL_Y at our net, -at theirs."""
     return car.pos.y * state.goal_sign
@@ -177,6 +200,25 @@ def support_position(state, model, prediction=None, ordinal: int = 1) -> Vec3:
 
     # Depth grows sharply with ordinal: 2nd man supports, 3rd man covers.
     distance = 1700.0 + 1900.0 * max(0, ordinal - 1)
+
+    # Scale by where the modelled player ACTUALLY sits. up_pitch is their mean
+    # distance from their own net; above the population median means they play
+    # further forward, so they support closer to the ball. committed_pct --
+    # time spent ahead of the ball during their OWN possession -- pushes the
+    # same way, because that is what pushing up looks like in the data.
+    #
+    # Clamped to 0.6-1.5 so no profile produces a second man glued to the ball
+    # or one parked on the goal line.
+    up = _MEASURED.get("up_pitch")
+    com = _MEASURED.get("committed_pct")
+    if up or com:
+        factor = 1.0
+        if up:
+            factor *= max(0.7, min(1.4, 2.0 - (up / POP_UP_PITCH)))
+        if com:
+            factor *= max(0.8, min(1.25, 1.0 - 0.5 * (com / POP_COMMITTED - 1.0)))
+        distance *= max(0.6, min(1.5, factor))
+
     pos = ball + back_dir * distance
 
     # Lateral separation. Alternate sides by ordinal so two supporters never

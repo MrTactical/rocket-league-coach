@@ -23,12 +23,43 @@ silently yields nothing when you get it wrong:
 from __future__ import annotations
 
 import json
+import datetime as _dt
 import math
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+def _ypr(q):
+    """
+    Quaternion -> (yaw, pitch, roll) in degrees.
+
+    Yaw is the compass direction the nose points, measured the same way as
+    atan2(vel_y, vel_x) so the two are directly comparable. Pitch is nose up,
+    roll is barrel rotation -- together they say whether the car is on its
+    wheels, which is what "am I actually able to drive right now" comes down
+    to.
+    """
+    x, y, z, w = (q.get("x", 0.0), q.get("y", 0.0),
+                  q.get("z", 0.0), q.get("w", 1.0))
+    n = math.sqrt(x * x + y * y + z * z + w * w) or 1.0
+    x, y, z, w = x / n, y / n, z / n, w / n
+    yaw = math.degrees(math.atan2(2.0 * (w * z + x * y),
+                                  1.0 - 2.0 * (y * y + z * z)))
+    sp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+    pitch = math.degrees(math.asin(sp))
+    roll = math.degrees(math.atan2(2.0 * (w * x + y * z),
+                                   1.0 - 2.0 * (x * x + y * y)))
+    return (yaw, pitch, roll)
+
+
+def upright(rot):
+    """True when the car is on its wheels enough to drive normally."""
+    if not rot:
+        return None
+    return abs(rot[1]) < 45.0 and abs(rot[2]) < 45.0
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,7 +128,23 @@ class Match:
         self.frames = d["network_frames"]["frames"]
 
         self.name = self.props.get("PlayerName")
+        # MatchStartEpoch first, the "Date" string only as a fallback.
+        #
+        # They disagree, and Date is the one that lies. Saving a replay from
+        # the in-game replay list writes a file whose Date property is NOT
+        # when the match was played, so six matches saved after a session
+        # came out ordered 15:30, 15:39, 15:47, 14:55, 15:01, 15:08 -- and
+        # "your last match" showed a game from forty minutes earlier, with the
+        # wrong lobby in it. The epoch reproduces the in-game match history
+        # exactly, results and order.
         self.date = self.props.get("Date")
+        ep = self.props.get("MatchStartEpoch")
+        if ep:
+            try:
+                self.date = _dt.datetime.fromtimestamp(int(ep)).strftime(
+                    "%Y-%m-%d %H-%M-%S")
+            except (ValueError, OSError, OverflowError):
+                pass          # keep the header string rather than lose a date
         self.team_size = int(self.props.get("TeamSize") or 0)
         self.score = (self.props.get("Team0Score") or 0,
                       self.props.get("Team1Score") or 0)
@@ -115,7 +162,14 @@ class Match:
     def _build(self):
         objects = self.objects
         actor_arch = {}
+        self.ball_live = False
+        self.ctx = {}
         pri_name, pri_team = {}, {}
+        pri_stat = {}          # live per-player counters (goals, saves, ping...)
+        car_cam = {}           # air/flip counters, keyed by car actor
+        cam_state = {}         # camera settings, keyed by CameraSettingsActor
+        cam_pri = {}           # CameraSettingsActor -> PRI actor
+        match_ctx = {}         # playlist, region, team size, server
         car_pri, car_team = {}, {}
         comp_car, comp_kind = {}, {}
         car_boost, car_input = {}, {}
@@ -168,6 +222,7 @@ class Match:
                     rb = val.get("RigidBody") or {}
                     loc, lv = rb.get("location"), rb.get("linear_velocity")
                     av = rb.get("angular_velocity")
+                    rot = rb.get("rotation")
                     s = state.setdefault(aid, {})
                     if loc:
                         s["pos"] = (loc["x"], loc["y"], loc["z"])
@@ -175,6 +230,15 @@ class Match:
                         s["vel"] = (lv["x"], lv["y"], lv["z"])
                     if av:
                         s["ang"] = (av["x"], av["y"], av["z"])
+                    if rot:
+                        # Orientation, as a quaternion. Where a car POINTS is
+                        # not where it is going: the difference between the
+                        # two is the whole of "did you actually turn around,
+                        # or are you just drifting backwards". Everything
+                        # downstream used to infer heading from velocity,
+                        # which cannot tell those apart and is pure noise at
+                        # a standstill.
+                        s["rot"] = _ypr(rot)
                     s["sleeping"] = rb.get("sleeping", False)
                 elif short in ("ReplicatedBoost", "ReplicatedBoostAmount"):
                     # Two spellings across replay eras, and they carry
@@ -205,6 +269,86 @@ class Match:
                 elif short == "bDriving":
                     car_input.setdefault(aid, {})["driving"] = bool(
                         val.get("Boolean"))
+
+                # --- camera. Ball cam on or off is a real coaching signal and
+                # it is replicated per car: bUsingSecondaryCamera is TRUE when
+                # ball cam is OFF. CameraYaw/Pitch say where the player is
+                # actually looking, which is not where the car points.
+                elif short == "bUsingSecondaryCamera":
+                    # The "secondary" camera IS ball cam. Reading this
+                    # inverted put every player in this lobby at 5-19% ball
+                    # cam, which is not a thing a Champion does -- the true
+                    # figures are 81-96%, and the implausible number is what
+                    # gave the sign away.
+                    cam_state.setdefault(aid, {})["ballcam"] = bool(
+                        val.get("Boolean"))
+                elif short == "bUsingBehindView":
+                    cam_state.setdefault(aid, {})["behind"] = bool(
+                        val.get("Boolean"))
+                elif short == "CameraYaw":
+                    cam_state.setdefault(aid, {})["cam_yaw"] = (
+                        (val.get("Byte", 128) - 128) / 127.0 * 180.0)
+                elif short == "CameraPitch":
+                    cam_state.setdefault(aid, {})["cam_pitch"] = (
+                        (val.get("Byte", 128) - 128) / 127.0 * 90.0)
+                elif short == "PRI":
+                    # Camera settings live on their own actor, which points at
+                    # the player through this. Keying them by the car actor
+                    # instead -- which is what the first attempt did -- simply
+                    # never matched, and ball-cam usage read as 0% of every
+                    # frame of every match.
+                    act = (val.get("ActiveActor") or {}).get("actor")
+                    if act is not None and act >= 0:
+                        cam_pri[aid] = act
+
+                # --- air state. DodgesRefreshedCounter rises on a flip reset;
+                # AirActivateCount counts air-dodge activations. Both only
+                # ever go up, so only a RISE is an event.
+                elif short == "DodgesRefreshedCounter":
+                    car = comp_car.get(aid, aid)
+                    n = val.get("Int")
+                    if isinstance(n, int):
+                        prev = car_cam.setdefault(car, {}).get("resets_raw")
+                        if prev is not None and n > prev:
+                            self.events.append({"t": t, "kind": "flip_reset",
+                                                "car": car})
+                        car_cam[car]["resets_raw"] = n
+                elif short == "AirActivateCount":
+                    car = comp_car.get(aid, aid)
+                    n = val.get("Int")
+                    if isinstance(n, int):
+                        car_cam.setdefault(car, {})["air_activations"] = n
+
+                # --- live per-player counters. The header carries only final
+                # totals; these are replicated as they happen, so they can be
+                # placed on the timeline.
+                elif short in ("MatchScore", "MatchGoals", "MatchSaves",
+                               "MatchShots", "MatchAssists", "CarDemolitions",
+                               "SelfDemolitions", "Ping", "TotalGameTimePlayed",
+                               "SteeringSensitivity"):
+                    v = val.get("Int")
+                    if v is None:
+                        v = val.get("Byte")
+                    if v is None:
+                        v = val.get("Float")
+                    if v is not None:
+                        pri_stat.setdefault(aid, {})[short] = v
+
+                # --- match context, once per match ---
+                elif short in ("ReplicatedGamePlaylist", "MaxTeamSize",
+                               "ReplicatedServerRegion", "ServerName"):
+                    match_ctx[short] = (val.get("Int") if val.get("Int")
+                                        is not None else val.get("String"))
+                elif short == "bBallHasBeenHit":
+                    # Authoritative kickoff state. Everything downstream was
+                    # inferring it from "ball within 100 uu of the centre spot
+                    # and nearly stationary", which is a guess that also fires
+                    # on a ball that happens to stop there in open play.
+                    self.ball_live = bool(val.get("Boolean"))
+                elif short == "RoundNum":
+                    n = val.get("Int")
+                    if isinstance(n, int):
+                        match_ctx["round"] = n
                 elif short == "ReplicatedActive":
                     kind = comp_kind.get(aid)
                     car = comp_car.get(aid)
@@ -253,6 +397,11 @@ class Match:
             if ball is None:
                 continue
 
+            pri_cam = {}
+            for cam_aid, pri_aid in cam_pri.items():
+                if cam_aid in cam_state:
+                    pri_cam[pri_aid] = cam_state[cam_aid]
+
             cars = {}
             for aid, arch in actor_arch.items():
                 if arch != CAR_ARCHETYPE:
@@ -275,6 +424,13 @@ class Match:
                     "pos": s["pos"],
                     "vel": s.get("vel", (0.0, 0.0, 0.0)),
                     "ang": s.get("ang", (0.0, 0.0, 0.0)),
+                    "rot": s.get("rot"),
+                    "ballcam": pri_cam.get(pri, {}).get("ballcam"),
+                    "cam_yaw": pri_cam.get(pri, {}).get("cam_yaw"),
+                    "cam_pitch": pri_cam.get(pri, {}).get("cam_pitch"),
+                    "flip_resets": car_cam.get(aid, {}).get("resets_raw"),
+                    "air_acts": car_cam.get(aid, {}).get("air_activations"),
+                    "live": dict(pri_stat.get(pri, {})),
                     "boost": b,
                     "throttle": inp.get("throttle", 0.0),
                     "steer": inp.get("steer", 0.0),
@@ -312,9 +468,12 @@ class Match:
             if cars:
                 self.samples.append({
                     "t": t, "clock": clock, "hit_team": hit_team,
+                    "ball_live": self.ball_live,
                     "ball": ball["pos"], "ball_vel": ball.get("vel", (0, 0, 0)),
                     "cars": cars,
                 })
+
+        self.ctx = dict(match_ctx)
 
         # Attribute car-indexed events to player names.
         actor_to_name = {}
